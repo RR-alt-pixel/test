@@ -4,7 +4,7 @@
     <title>CRM Search Mini App</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
-        /* (Оставьте стили из вашего кода image_cd8147.png без изменений) */
+        /* CSS стили для оформления Mini App */
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             padding: 10px;
@@ -48,27 +48,29 @@
             padding: 10px;
             border-radius: 5px;
             margin-top: 15px;
+            /* Выделяем красным цветом, чтобы показать ошибку */
+            border: 1px solid var(--tg-theme-destructive-text-color); 
         }
     </style>
 </head>
 <body>
     <div id="app">
         <h1>CRM Поиск</h1>
-        <p>Введите ИИН, телефон или ФИО...</p>
+        <p>Введите ИИН, телефон или ФИО.</p>
         <input type="text" id="queryInput" placeholder="Введите данные">
         <button id="searchButton">ИСКАТЬ</button>
         <div id="resultOutput" class="result">Здесь появится результат.</div>
     </div>
 
     <script>
-        // 🟢 АДРЕС ВАШЕГО BACKEND (API) НА RENDER.COM
-        const API_BASE_URL = "https://test-vk44.onrender.com"; // Убедитесь, что это ваш точный URL
+        // 🛑 УБЕДИТЕСЬ, ЧТО ЭТО ТОЧНЫЙ АДРЕС ВАШЕГО BACKEND (API) НА RENDER.COM
+        const API_BASE_URL = "https://test-vk44.onrender.com"; 
         
         const queryInput = document.getElementById('queryInput');
         const searchButton = document.getElementById('searchButton');
         const resultOutput = document.getElementById('resultOutput');
 
-        // Инициализация Mini App (для настройки цветов и закрытия)
+        // Инициализация Mini App
         if (window.Telegram && window.Telegram.WebApp) {
             Telegram.WebApp.ready();
             Telegram.WebApp.expand();
@@ -82,13 +84,17 @@
                 return;
             }
 
-            // 🟢 БЛОК ИЗВЛЕЧЕНИЯ ID ПОЛЬЗОВАТЕЛЯ
+            // 🟢 БЛОК ИЗВЛЕЧЕНИЯ ID ПОЛЬЗОВАТЕЛЯ ИЗ ДАННЫХ TELEGRAM
             let userId = null;
             if (window.Telegram && window.Telegram.WebApp && Telegram.WebApp.initDataUnsafe && Telegram.WebApp.initDataUnsafe.user) {
+                // Извлекаем ID текущего пользователя, который открыл Mini App
                 userId = Telegram.WebApp.initDataUnsafe.user.id;
-            } else {
+            } 
+            
+            if (userId === null) {
+                // Если ID не получен (что маловероятно в реальном Telegram), блокируем
                 resultOutput.className = 'error';
-                resultOutput.innerHTML = 'Ошибка: Не удалось получить ID пользователя Telegram.';
+                resultOutput.innerHTML = 'Ошибка авторизации: Не удалось получить ваш ID Telegram.';
                 return;
             }
 
@@ -104,7 +110,7 @@
                     },
                     body: JSON.stringify({
                         query: query,
-                        // 🟢 ОТПРАВЛЯЕМ ID ПОЛЬЗОВАТЕЛЯ В API
+                        // 🟢 ОТПРАВЛЯЕМ ID ПОЛЬЗОВАТЕЛЯ В API ДЛЯ ПРОВЕРКИ ДОСТУПА
                         telegram_user_id: userId 
                     })
                 });
@@ -114,11 +120,12 @@
                 if (response.ok) {
                     // Успешный ответ
                     resultOutput.className = 'result';
-                    resultOutput.innerHTML = data.result;
+                    // Используем innerHTML, чтобы отобразить HTML-теги <b>
+                    resultOutput.innerHTML = data.result; 
                 } else if (response.status === 403) {
-                    // Ошибка доступа (от нашего кода, если нет в ALLOWED_USER_IDS)
+                    // 🛑 ОБРАБОТКА ОШИБКИ ДОСТУПА (403 Forbidden)
                     resultOutput.className = 'error';
-                    resultOutput.innerHTML = `❌ ${data.error || 'У вас нет доступа к этому приложению.'}`;
+                    resultOutput.innerHTML = `❌ ДОСТУП ЗАПРЕЩЕН: ${data.error || 'У вас нет разрешения на использование этого приложения.'}`;
                 } else {
                     // Ошибка на стороне сервера (ошибка CRM, 500 и т.д.)
                     resultOutput.className = 'error';
@@ -128,7 +135,7 @@
             } catch (error) {
                 // Ошибка сети или CORS
                 resultOutput.className = 'error';
-                resultOutput.innerHTML = '❌ Ошибка сети или сервера: Failed to fetch';
+                resultOutput.innerHTML = '❌ Ошибка сети или сервера: Проверьте подключение или статус API.';
                 console.error('Fetch error:', error);
             } finally {
                 searchButton.disabled = false;
