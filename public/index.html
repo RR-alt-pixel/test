@@ -1,111 +1,139 @@
 <!DOCTYPE html>
-<html>
+<html lang="ru">
 <head>
     <title>CRM Search Mini App</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
-        /* Использование переменных темы Telegram для адаптации к тёмной/светлой теме */
-        body { 
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            padding: 15px; 
-            background-color: var(--tg-theme-bg-color); 
-            color: var(--tg-theme-text-color); 
+        /* (Оставьте стили из вашего кода image_cd8147.png без изменений) */
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            padding: 10px;
+            background-color: var(--tg-theme-bg-color);
+            color: var(--tg-theme-text-color);
             margin: 0;
         }
-        input[type="text"] { 
-            width: 100%; 
-            padding: 12px; 
-            box-sizing: border-box; 
-            margin-bottom: 20px; 
-            background-color: var(--tg-theme-secondary-bg-color); 
-            border: 1px solid var(--tg-theme-hint-color); 
-            color: var(--tg-theme-text-color); 
-            border-radius: 8px; 
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            box-sizing: border-box;
+            margin-bottom: 10px;
+            background-color: var(--tg-theme-secondary-bg-color);
+            border: 1px solid var(--tg-theme-hint-color);
+            color: var(--tg-theme-text-color);
+            border-radius: 5px;
             font-size: 16px;
         }
-        .result { 
-            white-space: pre-wrap; 
-            background-color: var(--tg-theme-secondary-bg-color); 
-            padding: 15px; 
-            border-radius: 8px; 
-            overflow-x: auto;
+        button {
+            width: 100%;
+            padding: 10px;
+            background-color: var(--tg-theme-button-color);
+            color: var(--tg-theme-button-text-color);
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
         }
-        h3 {
+        .result {
+            white-space: pre-wrap;
+            background-color: var(--tg-theme-secondary-bg-color);
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 15px;
             color: var(--tg-theme-text-color);
+            font-size: 14px;
+        }
+        .error {
+            color: var(--tg-theme-destructive-text-color);
+            background-color: var(--tg-theme-secondary-bg-color);
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 15px;
         }
     </style>
 </head>
 <body>
-
-    <h3>CRM Поиск</h3>
-    <input type="text" id="searchInput" placeholder="Введите ИИН, телефон или ФИО..." oninput="checkInput()">
-    
-    <div class="result" id="resultDiv">
-        Здесь появится результат.
+    <div id="app">
+        <h1>CRM Поиск</h1>
+        <p>Введите ИИН, телефон или ФИО...</p>
+        <input type="text" id="queryInput" placeholder="Введите данные">
+        <button id="searchButton">ИСКАТЬ</button>
+        <div id="resultOutput" class="result">Здесь появится результат.</div>
     </div>
 
     <script>
-        // !!! ИЗМЕНИТЕ ЭТОТ URL НА АДРЕС ВАШЕГО РАЗВЕРНУТОГО FLASK API С HTTPS !!!
-        const API_BASE_URL = "https://test-vk44.onrender.com"; 
-
-        if (window.Telegram.WebApp) {
-            // Инициализация Mini App
-            window.Telegram.WebApp.ready();
-            // Настройка главной кнопки "Искать"
-            window.Telegram.WebApp.MainButton.setText('ИСКАТЬ');
-            window.Telegram.WebApp.MainButton.onClick(handleSearch);
-            window.Telegram.WebApp.MainButton.hide(); // Скрываем по умолчанию
-        } else {
-            document.getElementById('resultDiv').innerText = "Это приложение должно быть запущено в Telegram.";
-        }
+        // 🟢 АДРЕС ВАШЕГО BACKEND (API) НА RENDER.COM
+        const API_BASE_URL = "https://test-vk44.onrender.com"; // Убедитесь, что это ваш точный URL
         
-        // Показывает/скрывает кнопку, если есть текст
-        function checkInput() {
-            const query = document.getElementById('searchInput').value.trim();
-            if (query.length > 0) {
-                window.Telegram.WebApp.MainButton.show();
-            } else {
-                window.Telegram.WebApp.MainButton.hide();
-            }
+        const queryInput = document.getElementById('queryInput');
+        const searchButton = document.getElementById('searchButton');
+        const resultOutput = document.getElementById('resultOutput');
+
+        // Инициализация Mini App (для настройки цветов и закрытия)
+        if (window.Telegram && window.Telegram.WebApp) {
+            Telegram.WebApp.ready();
+            Telegram.WebApp.expand();
         }
 
-        async function handleSearch() {
-            const query = document.getElementById('searchInput').value.trim();
-            const resultDiv = document.getElementById('resultDiv');
+        searchButton.addEventListener('click', async () => {
+            const query = queryInput.value.trim();
+            if (!query) {
+                resultOutput.className = 'error';
+                resultOutput.innerHTML = 'Введите запрос.';
+                return;
+            }
 
-            if (!query) return;
+            // 🟢 БЛОК ИЗВЛЕЧЕНИЯ ID ПОЛЬЗОВАТЕЛЯ
+            let userId = null;
+            if (window.Telegram && window.Telegram.WebApp && Telegram.WebApp.initDataUnsafe && Telegram.WebApp.initDataUnsafe.user) {
+                userId = Telegram.WebApp.initDataUnsafe.user.id;
+            } else {
+                resultOutput.className = 'error';
+                resultOutput.innerHTML = 'Ошибка: Не удалось получить ID пользователя Telegram.';
+                return;
+            }
 
-            // Блокируем кнопку и показываем прогресс
-            window.Telegram.WebApp.MainButton.showProgress(true);
+            resultOutput.className = 'result';
+            resultOutput.innerHTML = 'Поиск...';
+            searchButton.disabled = true;
 
             try {
                 const response = await fetch(`${API_BASE_URL}/api/search`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        // Передача данных Telegram для проверки безопасности (на Backend)
-                        'X-Telegram-Init-Data': window.Telegram.WebApp.initData 
                     },
-                    body: JSON.stringify({ query: query })
+                    body: JSON.stringify({
+                        query: query,
+                        // 🟢 ОТПРАВЛЯЕМ ID ПОЛЬЗОВАТЕЛЯ В API
+                        telegram_user_id: userId 
+                    })
                 });
 
                 const data = await response.json();
 
                 if (response.ok) {
-                    // Результат (HTML-строка, полученная от Python API)
-                    resultDiv.innerHTML = data.result; 
+                    // Успешный ответ
+                    resultOutput.className = 'result';
+                    resultOutput.innerHTML = data.result;
+                } else if (response.status === 403) {
+                    // Ошибка доступа (от нашего кода, если нет в ALLOWED_USER_IDS)
+                    resultOutput.className = 'error';
+                    resultOutput.innerHTML = `❌ ${data.error || 'У вас нет доступа к этому приложению.'}`;
                 } else {
-                    // Обработка ошибок
-                    resultDiv.innerHTML = '❌ Ошибка: ' + (data.error || 'Неизвестная ошибка API.');
+                    // Ошибка на стороне сервера (ошибка CRM, 500 и т.д.)
+                    resultOutput.className = 'error';
+                    resultOutput.innerHTML = `❌ Ошибка сервера: ${data.error || 'Неизвестная ошибка.'}`;
                 }
 
             } catch (error) {
-                resultDiv.innerHTML = '❌ Ошибка сети или сервера: ' + error.message;
+                // Ошибка сети или CORS
+                resultOutput.className = 'error';
+                resultOutput.innerHTML = '❌ Ошибка сети или сервера: Failed to fetch';
+                console.error('Fetch error:', error);
             } finally {
-                window.Telegram.WebApp.MainButton.hideProgress();
+                searchButton.disabled = false;
             }
-        }
+        });
     </script>
-
 </body>
 </html>
