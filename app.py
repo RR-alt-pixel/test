@@ -4,7 +4,8 @@ import json
 import os
 import time
 import itertools
-from flask import CORS, Flask, request, jsonify
+from flask import Flask, request, jsonify  # Импортируем только то, что есть в Flask
+from flask_cors import CORS # <--- ИМПОРТИРУЕМ CORS ИЗ ОТДЕЛЬНОЙ БИБЛИОТЕКИ!
 
 # ================== НАСТРОЙКИ (Ваши настройки) ==================
 # BOT_TOKEN, USERS_FILE и прочие настройки, связанные с Telegram-ботом, 
