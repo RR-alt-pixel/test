@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CRM Search Mini App</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        /* Использование переменных темы Telegram для адаптации к тёмной/светлой теме */
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            padding: 15px; 
+            background-color: var(--tg-theme-bg-color); 
+            color: var(--tg-theme-text-color); 
+            margin: 0;
+        }
+        input[type="text"] { 
+            width: 100%; 
+            padding: 12px; 
+            box-sizing: border-box; 
+            margin-bottom: 20px; 
+            background-color: var(--tg-theme-secondary-bg-color); 
+            border: 1px solid var(--tg-theme-hint-color); 
+            color: var(--tg-theme-text-color); 
+            border-radius: 8px; 
+            font-size: 16px;
+        }
+        .result { 
+            white-space: pre-wrap; 
+            background-color: var(--tg-theme-secondary-bg-color); 
+            padding: 15px; 
+            border-radius: 8px; 
+            overflow-x: auto;
+        }
+        h3 {
+            color: var(--tg-theme-text-color);
+        }
+    </style>
+</head>
+<body>
+
+    <h3>CRM Поиск</h3>
+    <input type="text" id="searchInput" placeholder="Введите ИИН, телефон или ФИО..." oninput="checkInput()">
+    
+    <div class="result" id="resultDiv">
+        Здесь появится результат.
+    </div>
+
+    <script>
+        // !!! ИЗМЕНИТЕ ЭТОТ URL НА АДРЕС ВАШЕГО РАЗВЕРНУТОГО FLASK API С HTTPS !!!
+        const API_BASE_URL = "https://ваш-домен.com"; 
+
+        if (window.Telegram.WebApp) {
+            // Инициализация Mini App
+            window.Telegram.WebApp.ready();
+            // Настройка главной кнопки "Искать"
+            window.Telegram.WebApp.MainButton.setText('ИСКАТЬ');
+            window.Telegram.WebApp.MainButton.onClick(handleSearch);
+            window.Telegram.WebApp.MainButton.hide(); // Скрываем по умолчанию
+        } else {
+            document.getElementById('resultDiv').innerText = "Это приложение должно быть запущено в Telegram.";
+        }
+        
+        // Показывает/скрывает кнопку, если есть текст
+        function checkInput() {
+            const query = document.getElementById('searchInput').value.trim();
+            if (query.length > 0) {
+                window.Telegram.WebApp.MainButton.show();
+            } else {
+                window.Telegram.WebApp.MainButton.hide();
+            }
+        }
+
+        async function handleSearch() {
+            const query = document.getElementById('searchInput').value.trim();
+            const resultDiv = document.getElementById('resultDiv');
+
+            if (!query) return;
+
+            // Блокируем кнопку и показываем прогресс
+            window.Telegram.WebApp.MainButton.showProgress(true);
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/search`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        // Передача данных Telegram для проверки безопасности (на Backend)
+                        'X-Telegram-Init-Data': window.Telegram.WebApp.initData 
+                    },
+                    body: JSON.stringify({ query: query })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    // Результат (HTML-строка, полученная от Python API)
+                    resultDiv.innerHTML = data.result; 
+                } else {
+                    // Обработка ошибок
+                    resultDiv.innerHTML = '❌ Ошибка: ' + (data.error || 'Неизвестная ошибка API.');
+                }
+
+            } catch (error) {
+                resultDiv.innerHTML = '❌ Ошибка сети или сервера: ' + error.message;
+            } finally {
+                window.Telegram.WebApp.MainButton.hideProgress();
+            }
+        }
+    </script>
+
+</body>
+</html>
