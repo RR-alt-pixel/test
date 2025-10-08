@@ -4,14 +4,24 @@ import json
 import os
 import time
 import itertools
-from flask import Flask, request, jsonify  # Импортируем только то, что есть в Flask
-from flask_cors import CORS # <--- ИМПОРТИРУЕМ CORS ИЗ ОТДЕЛЬНОЙ БИБЛИОТЕКИ!
+from flask import Flask, request, jsonify 
+from flask_cors import CORS # 🟢 Импорт CORS из правильной библиотеки
 
-# ================== НАСТРОЙКИ (Ваши настройки) ==================
-# BOT_TOKEN, USERS_FILE и прочие настройки, связанные с Telegram-ботом, 
-# больше не используются в этом файле.
+# ================== НАСТРОЙКИ И АВТОРИЗАЦИЯ ==================
+
+# 🛑 1. ЗАМЕНИТЕ: Токен вашего рабочего бота
+BOT_TOKEN = "7966914480:AAEeWXbLeIYjAMLKARCWzSJOKo9c_Cfyvhs" 
+
+# 🛑 2. ЗАМЕНИТЕ: Список Telegram ID, которым разрешен доступ (целые числа!)
+ALLOWED_USER_IDS = [
+    7360585112, # Ваш ID
+    987654321, # ID вашего коллеги
+    # ... добавьте все нужные ID ...
+]
+
 BASE_URL = "https://crm431241.ru/api/v2/person-search/"
 LOGIN_URL = "https://crm431241.ru/api/auth/login"
+SECRET_TOKEN = "YOUR_SUPER_SECRET_TOKEN_12345" 
 
 # ================== АККАУНТЫ ==================
 accounts = [
@@ -27,14 +37,12 @@ accounts = [
     {"username": "Brown10", "password": "77RE77RE"},
 ]
 
-# Пул токенов: [{"username": ..., "access": ..., "csrf": ..., "time": ...}]
 token_pool = []
 token_cycle = None
 
-# ================== CRM & ТОКЕНЫ (Ваша логика, адаптированная) ==================
+# ================== ЛОГИКА CRM И ТОКЕНЫ ==================
 
 def login_crm(username, password):
-    # Логика логина остаётся без изменений
     try:
         r = requests.post(LOGIN_URL, json={
             "username": username,
@@ -72,10 +80,12 @@ def init_token_pool():
         print(f"[POOL] Успешно загружено {len(token_pool)} токенов ✅")
 
 def crm_get(endpoint, params=None):
-    # Логика запроса и обновления токенов без изменений
     global token_cycle, token_pool
     if not token_cycle:
         init_token_pool()
+
+    if not token_pool:
+        return "❌ Ошибка: Нет доступных токенов CRM."
 
     token = next(token_cycle)
     headers = {
@@ -94,7 +104,6 @@ def crm_get(endpoint, params=None):
         return f"❌ Ошибка соединения: {e}"
 
     if r.status_code in (401, 403):
-        # Логика перелогина
         print(f"[AUTH] {token['username']} → токен устарел, перелогин...")
         acc_info = next((acc for acc in accounts if acc["username"] == token["username"]), None)
         if acc_info:
@@ -105,13 +114,12 @@ def crm_get(endpoint, params=None):
                     token_pool[idx] = new_t
                 token_cycle = itertools.cycle(token_pool)
                 print(f"[AUTH] {token['username']} обновлён ✅")
-                # Повторяем запрос
                 return crm_get(endpoint, params)
             else:
                 print(f"[AUTH FAIL] {token['username']} не смог обновиться.")
     return r
 
-# ================== ЛОГИКА ПОИСКА (Без изменений) ==================
+# ================== ФУНКЦИИ ПОИСКА ==================
 
 def search_by_iin(iin):
     r = crm_get(BASE_URL + "by-iin", params={"iin": iin})
@@ -180,15 +188,29 @@ def search_by_fio(text):
 
 # ================== API ENDPOINT (Flask) ==================
 app = Flask(__name__)
-# ДОБАВИТЬ ЭТУ СТРОКУ! Она разрешает запросы со ВСЕХ источников.
+
+# 🟢 ИНИЦИАЛИЗАЦИЯ CORS: Разрешаем ВСЕ запросы со ВСЕХ источников
 CORS(app, resources={r"/*": {"origins": "*"}}) 
 
 @app.route('/api/search', methods=['POST'])
-
-@app.route('/api/search', methods=['POST'])
 def api_search():
-    # Mini App пришлёт данные в JSON-формате
     data = request.json
+    
+    # 🚨 БЛОК ПРОВЕРКИ АВТОРИЗАЦИИ ПО ID 🚨
+    user_id = data.get('telegram_user_id')
+    
+    if user_id is None:
+        return jsonify({"error": "Ошибка авторизации: ID пользователя не найден."}), 403
+
+    try:
+        # Проверяем, есть ли ID в списке разрешенных
+        if int(user_id) not in ALLOWED_USER_IDS:
+            print(f"❌ Доступ запрещен для ID: {user_id}")
+            return jsonify({"error": "У вас нет доступа к этому приложению."}), 403
+    except ValueError:
+        return jsonify({"error": "Неверный формат ID пользователя."}), 403
+    # ---------------------------------------------
+    
     query = data.get('query', '').strip()
     
     if not query:
@@ -204,9 +226,8 @@ def api_search():
 
     # Mini App ожидает JSON-ответ
     if reply.startswith('❌') or reply.startswith('⚠️'):
-         # Если ошибка, вернём её явно
         return jsonify({"error": reply.replace("❌ ", "").replace("⚠️ ", "")}), 400
-    
+        
     return jsonify({"result": reply})
 
 # ================== ЗАПУСК ==================
@@ -214,5 +235,4 @@ if __name__ == "__main__":
     print("🔐 Авторизация всех аккаунтов...")
     init_token_pool()
     print("🚀 API-сервер запущен на http://0.0.0.0:5000")
-    # ВАЖНО: При развертывании используйте Gunicorn или другой WSGI-сервер и HTTPS!
     app.run(host='0.0.0.0', port=5000)
