@@ -4,7 +4,7 @@ import json
 import os
 import time
 import itertools
-from flask import Flask, request, jsonify
+from flask import CORS, Flask, request, jsonify
 
 # ================== НАСТРОЙКИ (Ваши настройки) ==================
 # BOT_TOKEN, USERS_FILE и прочие настройки, связанные с Telegram-ботом, 
