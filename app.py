@@ -180,6 +180,10 @@ def search_by_fio(text):
 
 # ================== API ENDPOINT (Flask) ==================
 app = Flask(__name__)
+# ДОБАВИТЬ ЭТУ СТРОКУ! Она разрешает запросы со ВСЕХ источников.
+CORS(app, resources={r"/*": {"origins": "*"}}) 
+
+@app.route('/api/search', methods=['POST'])
 
 @app.route('/api/search', methods=['POST'])
 def api_search():
