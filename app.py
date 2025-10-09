@@ -5,16 +5,17 @@ import os
 import time
 import itertools
 from flask import Flask, request, jsonify 
-from flask_cors import CORS # 🟢 Импорт CORS из правильной библиотеки
+from flask_cors import CORS 
+from threading import Thread # 🟢 Необходимый импорт для фоновой задачи
 
 # ================== НАСТРОЙКИ И АВТОРИЗАЦИЯ ==================
 
 # 🛑 1. ЗАМЕНИТЕ: Токен вашего рабочего бота
 BOT_TOKEN = "7966914480:AAEeWXbLeIYjAMLKARCWzSJOKo9c_Cfyvhs" 
 
-# 🟢 ЭТОТ URL ТЕПЕРЬ БУДЕТ ИСПОЛЬЗОВАТЬСЯ ДЛЯ ЗАГРУЗКИ СПИСКА
+# 🟢 2. URL НА ВАШ ВНЕШНИЙ JSON-ФАЙЛ СО СПИСКОМ ID
 ALLOWED_USERS_URL = "https://raw.githubusercontent.com/RR-alt-pixel/test/refs/heads/main/allowed_ids.json" 
-# ВРЕМЕННОЕ ЗНАЧЕНИЕ: Если файл не загрузится, никто не сможет войти
+# ВРЕМЕННЫЙ СПИСОК: Используется, если не удалось загрузить файл
 ALLOWED_USER_IDS = [0] 
 
 BASE_URL = "https://crm431241.ru/api/v2/person-search/"
@@ -116,6 +117,47 @@ def crm_get(endpoint, params=None):
             else:
                 print(f"[AUTH FAIL] {token['username']} не смог обновиться.")
     return r
+
+# ================== ЛОГИКА ДИНАМИЧЕСКОЙ ЗАГРУЗКИ ID ==================
+LAST_FETCH_TIME = 0
+FETCH_INTERVAL = 3600 # Обновлять список раз в час (3600 секунд)
+
+def fetch_allowed_users():
+    """Загружает список разрешенных ID из внешнего источника."""
+    global ALLOWED_USER_IDS, LAST_FETCH_TIME
+    print("[AUTH-LOG] Начало попытки загрузки ID.")
+    try:
+        print(f"[AUTH-LOG] Загрузка списка ID с {ALLOWED_USERS_URL}...")
+        # Используем таймаут, чтобы не заблокировать сервер
+        response = requests.get(ALLOWED_USERS_URL, timeout=10) 
+        
+        print(f"[AUTH-LOG] Статус код от GitHub: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Пытаемся преобразовать ID в int, чтобы поймать ошибку формата
+            new_list = [int(i) for i in data.get("allowed_users", [])]
+            
+            if new_list:
+                ALLOWED_USER_IDS = new_list
+                LAST_FETCH_TIME = int(time.time())
+                print(f"[AUTH-LOG] УСПЕХ! Загружено {len(ALLOWED_USER_IDS)} разрешенных ID.")
+            else:
+                print("[AUTH-LOG ERROR] Список ID пуст в источнике, оставляем старый список.")
+        else:
+            print(f"[AUTH-LOG ERROR] Не удалось загрузить список ID. Статус: {response.status_code}")
+            
+    except Exception as e:
+        print(f"[AUTH-LOG CRITICAL ERROR] Исключение при загрузке: {e}")
+
+def periodic_fetch():
+    """Запускает функцию загрузки ID в фоновом режиме."""
+    while True:
+        # Проверяем, прошло ли достаточно времени с последней загрузки
+        if int(time.time()) - LAST_FETCH_TIME >= FETCH_INTERVAL:
+            fetch_allowed_users()
+        time.sleep(FETCH_INTERVAL) # Спим час
+
 
 # ================== ФУНКЦИИ ПОИСКА ==================
 
@@ -230,6 +272,14 @@ def api_search():
 
 # ================== ЗАПУСК ==================
 if __name__ == "__main__":
+    print("--- 🔴 DEBUG: НАЧАЛО ЗАПУСКА API 🔴 ---")
+    
+    print("🔐 Первая загрузка списка ID...")
+    fetch_allowed_users() # 🛑 1. Первая загрузка при старте
+    
+    print("🔄 Запуск фонового обновления списка ID...")
+    Thread(target=periodic_fetch, daemon=True).start() # 🛑 2. Запуск фонового потока
+    
     print("🔐 Авторизация всех аккаунтов...")
     init_token_pool()
     print("🚀 API-сервер запущен на http://0.0.0.0:5000")
