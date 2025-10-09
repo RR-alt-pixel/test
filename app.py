@@ -138,6 +138,7 @@ ALLOWED_USER_IDS = [
     5669547390,
     5725683353,
     7327085952,
+    7991695933,
 ]
 
 BASE_URL = "https://crm431241.ru/api/v2/person-search/"
