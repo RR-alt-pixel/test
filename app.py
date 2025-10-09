@@ -6,7 +6,7 @@ import time
 import itertools
 from flask import Flask, request, jsonify 
 from flask_cors import CORS 
-from threading import Thread # Необходимый импорт для фоновой задачи
+from threading import Thread 
 
 # ================== НАСТРОЙКИ И АВТОРИЗАЦИЯ ==================
 
@@ -20,7 +20,7 @@ ALLOWED_USER_IDS = [0]
 
 BASE_URL = "https://crm431241.ru/api/v2/person-search/"
 LOGIN_URL = "https://crm431241.ru/api/auth/login"
-SECRET_TOKEN = "YOUR_SUPER_SECRET_TOKEN_12345" 
+SECRET_TOKEN = "Refresh-Server-Key-2025-Oct-VK44" 
 
 # ================== АККАУНТЫ ==================
 accounts = [
@@ -240,7 +240,6 @@ def api_search():
         return jsonify({"error": "Ошибка авторизации: ID пользователя не найден."}), 403
 
     try:
-        # Проверяем, есть ли ID в списке разрешенных
         if int(user_id) not in ALLOWED_USER_IDS:
             print(f"❌ Доступ запрещен для ID: {user_id}")
             return jsonify({"error": "У вас нет доступа к этому приложению."}), 403
@@ -253,7 +252,6 @@ def api_search():
     if not query:
         return jsonify({"error": "Пустой запрос"}), 400
 
-    # Определение типа запроса и вызов соответствующей функции
     if query.isdigit() and len(query) == 12:
         reply = search_by_iin(query)
     elif query.startswith("+") or query.startswith("8") or query.startswith("7"):
@@ -261,11 +259,32 @@ def api_search():
     else:
         reply = search_by_fio(query)
 
-    # Mini App ожидает JSON-ответ
     if reply.startswith('❌') or reply.startswith('⚠️'):
         return jsonify({"error": reply.replace("❌ ", "").replace("⚠️ ", "")}), 400
         
     return jsonify({"result": reply})
+
+
+@app.route('/api/refresh-users', methods=['POST'])
+def refresh_users():
+    """Точка для немедленного принудительного обновления списка разрешенных ID."""
+    
+    # 🚨 Проверка на секретный токен
+    auth_header = request.headers.get('Authorization')
+    
+    # Проверка: Заголовок должен быть "Bearer YOUR_SECRET_TOKEN"
+    if auth_header != f"Bearer {SECRET_TOKEN}":
+        return jsonify({"error": "Неверный секретный токен. Доступ запрещен."}), 403
+
+    # Вызываем функцию немедленно, не дожидаясь таймера
+    print("[AUTH-LOG] Принудительное обновление списка ID запущено вручную.")
+    fetch_allowed_users()
+    
+    return jsonify({
+        "status": "success", 
+        "message": "Список разрешенных пользователей обновлен немедленно.",
+        "loaded_count": len(ALLOWED_USER_IDS)
+    }), 200
 
 
 # ================== ПРИНУДИТЕЛЬНЫЙ ЗАПУСК ИНИЦИАЛИЗАЦИИ GUNICORN ==================
@@ -274,13 +293,13 @@ def api_search():
 print("--- 🔴 DEBUG: НАЧАЛО ЗАПУСКА API 🔴 ---")
 
 print("🔐 Первая загрузка списка ID...")
-fetch_allowed_users() # Выполняем загрузку ID при старте сервера
+fetch_allowed_users() 
 
 print("🔄 Запуск фонового обновления списка ID...")
-Thread(target=periodic_fetch, daemon=True).start() # Запуск фонового потока
+Thread(target=periodic_fetch, daemon=True).start() 
 
 print("🔐 Авторизация всех аккаунтов...")
-init_token_pool() # Выполняем авторизацию токенов при старте сервера
+init_token_pool() 
 print("🚀 API-сервер готов к приему запросов.")
 
 # ================== ЗАПУСК (ТОЛЬКО ДЛЯ ЛОКАЛЬНОГО ТЕСТИРОВАНИЯ) ==================
