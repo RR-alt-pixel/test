@@ -41,16 +41,49 @@ token_cycle = None
 
 # ================== ЛОГИКА CRM И ТОКЕНЫ ==================
 
+import requests
+import json
+import os
+import time
+# ... остальные импорты ...
+
 def login_crm(username, password):
+    # 1. СТРОГИЕ ЗАГОЛОВКИ (для имитации браузера)
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0', 
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'ru-RU,ru;q=0.9',
+        'Referer': 'https://crm431241.ru/login', 
+        'Origin': 'https://crm431241.ru',
+        'Content-Type': 'application/json',
+    }
+    
+    # 2. РЕАЛЬНЫЕ ДАННЫЕ УСТРОЙСТВА (для обхода 423)
+    # Используем данные, которые вы предоставили.
+    device_info_data = {
+        "screenResolution": "1746x982",
+        "availableScreenResolution": "1746x939",
+        "screenColorDepth": 24,
+        "timeZone": "Asia/Almaty",
+        "language": "ru",
+        "browserName": "Chrome",
+        "browserVersion": "141.0.0.0",
+        "osName": "Windows",
+        "osVersion": "10",
+        "gpuVendor": "Google Inc.",
+        "gpuRenderer": "Google SwiftShader" 
+    }
+    
+    # 3. ПОПЫТКА ВХОДА
     try:
         r = requests.post(LOGIN_URL, json={
             "username": username,
             "password": password,
-            # 🟢 ИЗМЕНЕНИЕ: Удлинение отпечатка для имитации реального браузера
-            "device_fingerprint": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", 
-            "device_info": None,
+            # 🟢 КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Использование рабочего отпечатка
+            "device_fingerprint": "d179b7a8c08e6ac730e18205aee9477fd148e66e8cb66dd6e48937d82c5ae033",
+            "device_info": device_info_data, 
             "remember_me": False
-        }, timeout=15)
+        }, headers=headers, timeout=15)
         
         if r.status_code == 200:
             data = r.json()
