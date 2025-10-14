@@ -2,13 +2,17 @@
 FROM python:3.11-slim
 
 # Установка системных зависимостей для Playwright (Chromium)
+# ... (Предыдущие строки) ...
+
+# Установка системных зависимостей для Playwright (Chromium)
 RUN apt-get update && apt-get install -y \
     chromium \
     libnss3 \
     libfontconfig \
-    libgconf-2-4 \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
+    
+# ... (Последующие строки) ...
 
 # Установка рабочего каталога
 WORKDIR /app
