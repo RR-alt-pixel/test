@@ -46,10 +46,12 @@ def login_crm(username, password):
         r = requests.post(LOGIN_URL, json={
             "username": username,
             "password": password,
-            "device_fingerprint": "web-client",
+            # 🟢 ИЗМЕНЕНИЕ: Удлинение отпечатка для имитации реального браузера
+            "device_fingerprint": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", 
             "device_info": None,
             "remember_me": False
         }, timeout=15)
+        
         if r.status_code == 200:
             data = r.json()
             print(f"[LOGIN] {username} ✅")
@@ -61,8 +63,10 @@ def login_crm(username, password):
             }
         else:
             print(f"[LOGIN FAIL] {username}: {r.status_code} {r.text}")
+            
     except Exception as e:
         print(f"[LOGIN ERR] {username}: {e}")
+        
     return None
 
 def init_token_pool():
@@ -72,6 +76,10 @@ def init_token_pool():
         tok = login_crm(acc["username"], acc["password"])
         if tok:
             token_pool.append(tok)
+        
+        # 🟢 НОВОЕ: Добавить задержку между попытками логина
+        time.sleep(1.5) 
+        
     if not token_pool:
         print("❌ Нет активных токенов! Проверить логины/пароли.")
     else:
