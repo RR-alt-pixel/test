@@ -13,157 +13,113 @@ from threading import Thread
 # 🛑 1. ЗАМЕНИТЕ: Токен вашего рабочего бота
 BOT_TOKEN = "7966914480:AAEeWXbLeIYjAMLKARCWzSJOKo9c_Cfyvhs" 
 
-# 🟢 2. URL НА ВАШ ВНЕШНИЙ JSON-ФАЙЛ СО СПИСКОМ ID
+# 🟢 URL НА ВАШ ВНЕШНИЙ JSON-ФАЙЛ СО СПИСКОМ ID
 ALLOWED_USERS_URL = "https://raw.githubusercontent.com/RR-alt-pixel/test/refs/heads/main/allowed_ids.json" 
 # ВРЕМЕННЫЙ СПИСОК: Используется, если не удалось загрузить файл
 ALLOWED_USER_IDS = [0] 
 
+# 🟢 НОВОЕ: URL для загрузки рабочих токенов
+TOKENS_FILE_URL = "https://raw.githubusercontent.com/RR-alt-pixel/test/refs/heads/main/tokens.json"
+
 BASE_URL = "https://crm431241.ru/api/v2/person-search/"
-LOGIN_URL = "https://crm431241.ru/api/auth/login"
+# LOGIN_URL = "https://crm431241.ru/api/auth/login" # УДАЛЕНО: Не используется
 SECRET_TOKEN = "Refresh-Server-Key-2025-Oct-VK44" 
 
-# ================== АККАУНТЫ ==================
-accounts = [
-    {"username": "Brown1", "password": "48XQ48XQ"},
-    {"username": "Brown2", "password": "16QU16QU"},
-    {"username": "Brown3", "password": "39KU39KU"},
-    {"username": "Brown4", "password": "77HW77HW"},
-    {"username": "Brown5", "password": "38SK38SK"},
-    {"username": "Brown6", "password": "17HV17HV"},
-    {"username": "Brown7", "password": "37ML37ML"},
-    {"username": "Brown8", "password": "32UV32UV"},
-    {"username": "Brown9", "password": "55SG55SG"},
-    {"username": "Brown10", "password": "77RE77RE"},
-]
-
+# ================== АККАУНТЫ (РУЧНОЙ ПУЛ) ==================
+# 🛑 УДАЛЕН статический список логинов/паролей. Теперь пул загружается из tokens.json
 token_pool = []
 token_cycle = None
 
 # ================== ЛОГИКА CRM И ТОКЕНЫ ==================
 
-import requests
-import json
-import os
-import time
-# ... остальные импорты ...
-
-def login_crm(username, password):
-    # 1. СТРОГИЕ ЗАГОЛОВКИ (для имитации браузера)
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0', 
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'ru-RU,ru;q=0.9',
-        'Referer': 'https://crm431241.ru/login', 
-        'Origin': 'https://crm431241.ru',
-        'Content-Type': 'application/json',
-    }
-    
-    # 2. РЕАЛЬНЫЕ ДАННЫЕ УСТРОЙСТВА (для обхода 423)
-    # Используем данные, которые вы предоставили.
-    device_info_data = {
-        "screenResolution": "1746x982",
-        "availableScreenResolution": "1746x939",
-        "screenColorDepth": 24,
-        "timeZone": "Asia/Almaty",
-        "language": "ru",
-        "browserName": "Chrome",
-        "browserVersion": "141.0.0.0",
-        "osName": "Windows",
-        "osVersion": "10",
-        "gpuVendor": "Google Inc.",
-        "gpuRenderer": "Google SwiftShader" 
-    }
-    
-    # 3. ПОПЫТКА ВХОДА
-    try:
-        r = requests.post(LOGIN_URL, json={
-            "username": username,
-            "password": password,
-            # 🟢 КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Использование рабочего отпечатка
-            "device_fingerprint": "d179b7a8c08e6ac730e18205aee9477fd148e66e8cb66dd6e48937d82c5ae033",
-            "device_info": device_info_data, 
-            "remember_me": False
-        }, headers=headers, timeout=15)
-        
-        if r.status_code == 200:
-            data = r.json()
-            print(f"[LOGIN] {username} ✅")
-            return {
-                "username": username,
-                "access": data["access_token"],
-                "csrf": data["csrf_token"],
-                "time": int(time.time())
-            }
-        else:
-            print(f"[LOGIN FAIL] {username}: {r.status_code} {r.text}")
-            
-    except Exception as e:
-        print(f"[LOGIN ERR] {username}: {e}")
-        
-    return None
+# 🛑 УДАЛЕНА ФУНКЦИЯ login_crm, поскольку автоматическая авторизация не работает.
 
 def init_token_pool():
     global token_pool, token_cycle
-    token_pool.clear()
-    for acc in accounts:
-        tok = login_crm(acc["username"], acc["password"])
-        if tok:
-            token_pool.append(tok)
+    print("🔐 Загрузка ручных токенов из tokens.json...")
+    
+    try:
+        r = requests.get(TOKENS_FILE_URL, timeout=10)
         
-        # 🟢 НОВОЕ: Добавить задержку между попытками логина
-        time.sleep(1.5) 
-        
-    if not token_pool:
-        print("❌ Нет активных токенов! Проверить логины/пароли.")
-    else:
-        token_cycle = itertools.cycle(token_pool)
-        print(f"[POOL] Успешно загружено {len(token_pool)} токенов ✅")
+        if r.status_code == 200:
+            raw_tokens = r.json()
+            new_pool = []
+            
+            for t in raw_tokens:
+                # Считываем все 3 необходимых поля: access, csrf, session_id
+                new_pool.append({
+                    "username": t.get("username", "unknown"),
+                    "access": t.get("access", ""),
+                    "csrf": t.get("csrf", ""),
+                    "session_id": t.get("session_id", ""), # 🟢 Считываем session_id
+                    "time": int(time.time())
+                })
+            
+            token_pool = new_pool
+            
+            if not token_pool:
+                 print("❌ Нет токенов в ручном пуле! Проверьте tokens.json.")
+            else:
+                token_cycle = itertools.cycle(token_pool)
+                print(f"[POOL] УСПЕХ! Загружено {len(token_pool)} ручных токенов ✅")
+            
+        else:
+            print(f"[POOL FAIL] Ошибка загрузки токенов с GitHub. Статус: {r.status_code}")
+            
+    except Exception as e:
+        print(f"[POOL ERR] Критическая ошибка при загрузке токенов: {e}")
+
 
 def crm_get(endpoint, params=None):
     global token_cycle, token_pool
-    if not token_cycle:
+    if not token_cycle or not token_pool:
         init_token_pool()
 
     if not token_pool:
+        # Теперь init_token_pool возвращает None при ошибке, проверяем пул снова
         return "❌ Ошибка: Нет доступных токенов CRM."
 
-    token = next(token_cycle)
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Cookie": (
-            f"__Secure-access_token={token['access']}; "
-            f"__Secure-csrf_token={token['csrf']};"
-        ),
-        "X-CSRF-Token": token["csrf"]
-    }
+    # Максимальное количество попыток (размер пула)
+    max_attempts = len(token_pool) 
+    
+    for attempt in range(max_attempts):
+        token = next(token_cycle)
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            # 🟢 В заголовки Cookie добавлены access, csrf и session_id
+            "Cookie": (
+                f"__Secure-access_token={token['access']}; "
+                f"__Secure-csrf_token={token['csrf']};"
+                f"__Secure-session_id={token['session_id']};"
+            ),
+            "X-CSRF-Token": token["csrf"]
+        }
 
-    try:
-        r = requests.get(endpoint, headers=headers, params=params, timeout=15)
-    except Exception as e:
-        return f"❌ Ошибка соединения: {e}"
+        try:
+            r = requests.get(endpoint, headers=headers, params=params, timeout=15)
+        except Exception as e:
+            print(f"[CONN ERR] {token['username']}: {e}. Пробуем следующий токен.")
+            continue 
 
-    if r.status_code in (401, 403):
-        print(f"[AUTH] {token['username']} → токен устарел, перелогин...")
-        acc_info = next((acc for acc in accounts if acc["username"] == token["username"]), None)
-        if acc_info:
-            new_t = login_crm(acc_info["username"], acc_info["password"])
-            if new_t:
-                idx = next((i for i, t in enumerate(token_pool) if t["username"] == token["username"]), None)
-                if idx is not None:
-                    token_pool[idx] = new_t
-                token_cycle = itertools.cycle(token_pool)
-                print(f"[AUTH] {token['username']} обновлён ✅")
-                return crm_get(endpoint, params)
-            else:
-                print(f"[AUTH FAIL] {token['username']} не смог обновиться.")
-    return r
+        if r.status_code in (401, 403):
+            # 🛑 РУЧНОЙ РЕЖИМ: Перелогин невозможен. Просто переходим к следующему токену.
+            print(f"[AUTH FAIL] {token['username']} токен устарел/заблокирован. Требуется ручное обновление tokens.json. Переход к следующему токену.")
+            continue 
+
+        # Если код 200, или другая ошибка, которую нужно вернуть пользователю.
+        return r
+    
+    # Если прошли через все токены и не получили 200, возвращаем ошибку.
+    return "❌ Ошибка: Все токены в пуле неактивны. Обновите tokens.json."
+
 
 # ================== ЛОГИКА ДИНАМИЧЕСКОЙ ЗАГРУЗКИ ID ==================
 LAST_FETCH_TIME = 0
 FETCH_INTERVAL = 3600 # Обновлять список раз в час (3600 секунд)
 
 def fetch_allowed_users():
+    # ... (Оставляем эту функцию без изменений)
     """Загружает список разрешенных ID из внешнего источника."""
     global ALLOWED_USER_IDS, LAST_FETCH_TIME
     print("[AUTH-LOG] Начало попытки загрузки ID.")
@@ -190,6 +146,7 @@ def fetch_allowed_users():
         print(f"[AUTH-LOG CRITICAL ERROR] Исключение при загрузке: {e}")
 
 def periodic_fetch():
+    # ... (Оставляем эту функцию без изменений)
     """Запускает функцию загрузки ID в фоновом режиме."""
     while True:
         if int(time.time()) - LAST_FETCH_TIME >= FETCH_INTERVAL:
@@ -198,7 +155,7 @@ def periodic_fetch():
 
 
 # ================== ФУНКЦИИ ПОИСКА ==================
-
+# ... (Оставляем функции search_by_iin, search_by_phone, search_by_fio без изменений)
 def search_by_iin(iin):
     r = crm_get(BASE_URL + "by-iin", params={"iin": iin})
     if isinstance(r, str): return r
@@ -264,6 +221,7 @@ def search_by_fio(text):
         )
     return "📌 Результаты поиска по ФИО:\n\n" + "\n".join(results)
 
+
 # ================== API ENDPOINT (Flask) ==================
 app = Flask(__name__)
 
@@ -272,6 +230,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 @app.route('/api/search', methods=['POST'])
 def api_search():
+# ... (Оставляем эту функцию без изменений)
     data = request.json
     
     # 🚨 БЛОК ПРОВЕРКИ АВТОРИЗАЦИИ ПО ID 🚨
@@ -301,6 +260,7 @@ def api_search():
         reply = search_by_fio(query)
 
     if reply.startswith('❌') or reply.startswith('⚠️'):
+        # Возвращаем 400 и сообщение об ошибке, если оно начинается с ❌ или ⚠️
         return jsonify({"error": reply.replace("❌ ", "").replace("⚠️ ", "")}), 400
         
     return jsonify({"result": reply})
@@ -308,6 +268,7 @@ def api_search():
 
 @app.route('/api/refresh-users', methods=['POST'])
 def refresh_users():
+# ... (Оставляем эту функцию без изменений)
     """Точка для немедленного принудительного обновления списка разрешенных ID."""
     
     # 🚨 Проверка на секретный токен
@@ -339,10 +300,10 @@ fetch_allowed_users()
 print("🔄 Запуск фонового обновления списка ID...")
 Thread(target=periodic_fetch, daemon=True).start() 
 
-print("🔐 Авторизация всех аккаунтов...")
-init_token_pool() 
+print("🔐 Загрузка ручных токенов...")
+init_token_pool() # 🟢 Теперь просто загружаем токены из tokens.json
 print("🚀 API-сервер готов к приему запросов.")
 
 # ================== ЗАПУСК (ТОЛЬКО ДЛЯ ЛОКАЛЬНОГО ТЕСТИРОВАНИЯ) ==================
 if __name__ == "__main__":
-   app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000)
