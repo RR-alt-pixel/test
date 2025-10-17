@@ -43,7 +43,7 @@ token_cycle = None
 def login_crm(username, password, p):
     """
     Выполняет вход через Playwright, используя явный путь к исполняемому файлу
-    Chromium для обхода проблем Gunicorn/Render.
+    Chromium Headless Shell для обхода проблем Gunicorn/Render.
     """
     browser = None
     
@@ -51,15 +51,15 @@ def login_crm(username, password, p):
     # Playwright 1.55 использует билд v1187. Используем этот номер.
     PLAYWRIGHT_BUILD_VERSION = '1187' 
     
-    # Явно указываем путь к исполняемому файлу Chrome. 
-    # Это обходит проблему, когда Gunicorn не видит кеш сборки в рабочем процессе.
+    # Явно указываем путь к исполняемому файлу Headless Shell, который
+    # был в первых ошибках 'Executable doesn't exist'.
     CHROMIUM_EXECUTABLE_PATH = os.path.join(
         os.path.expanduser('~'), 
         '.cache', 
         'ms-playwright', 
-        f'chromium-{PLAYWRIGHT_BUILD_VERSION}', 
+        f'chromium_headless_shell-{PLAYWRIGHT_BUILD_VERSION}', 
         'chrome-linux', 
-        'chrome'
+        'headless_shell' # <--- ИСПРАВЛЕННЫЙ ПУТЬ
     )
     # --------------------------------------------------------
     
@@ -125,7 +125,7 @@ def login_crm(username, password, p):
     finally:
         if browser:
             browser.close()
-
+            
 def init_token_pool():
     global token_pool, token_cycle
     token_pool.clear()
