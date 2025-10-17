@@ -19,18 +19,18 @@ BOT_TOKEN = "8240195944:AAEQFd2met5meCU1uwu5PvPejJoiKu94cms"
 ALLOWED_USERS_URL = "https://raw.githubusercontent.com/RR-alt-pixel/test/refs/heads/main/allowed_ids.json" 
 ALLOWED_USER_IDS = [0] 
 
-BASE_URL = "https://crm431241.ru/api/v2/person-search/"
+BASE_URL = "https://crm431241.ru" # Упрощенный BASE_URL для удобства
 SECRET_TOKEN = "Refresh-Server-Key-2025-Oct-VK44" 
 
 # ================== НАСТРОЙКИ PLAYWRIGHT ==================
-LOGIN_URL_PLW = "https://crm431241.ru/auth/login" 
-DASHBOARD_URL = "https://crm431241.ru/dashboard" 
+LOGIN_URL_PLW = f"{BASE_URL}/auth/login" 
+DASHBOARD_URL = f"{BASE_URL}/dashboard" 
 LOGIN_SELECTOR = '#username'      
-PASSWORD_SELECTOR = '#password'  
-SIGN_IN_BUTTON_SELECTOR = 'button:has-text("Sign in")'
+PASSWORD_SELECTOR = '#password' 
+SIGN_IN_BUTTON_SELECTOR = 'button[type="submit"]' # Исправлен селектор кнопки, если он был неточным
 
 # ================== АККАУНТЫ ==================
-# Используем blue1, который был разблокирован
+# Используем blue1, который вы подтвердили, что работает
 accounts = [
     {"username": "blue1", "password": "852dfghm"}, 
 ]
@@ -41,13 +41,41 @@ token_cycle = None
 # ================== ЛОГИКА CRM И ТОКЕНЫ (Playwright) ==================
 
 def login_crm(username, password, p):
-    """Выполняет вход через Playwright для обхода защиты 423/401."""
+    """
+    Выполняет вход через Playwright, используя явный путь к исполняемому файлу
+    Chromium для обхода проблем Gunicorn/Render.
+    """
     browser = None
+    
+    # --- КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ PLAYWRIGHT ДЛЯ RENDER ---
+    # Playwright 1.55 использует билд v1187. Используем этот номер.
+    PLAYWRIGHT_BUILD_VERSION = '1187' 
+    
+    # Явно указываем путь к исполняемому файлу Chrome. 
+    # Это обходит проблему, когда Gunicorn не видит кеш сборки в рабочем процессе.
+    CHROMIUM_EXECUTABLE_PATH = os.path.join(
+        os.path.expanduser('~'), 
+        '.cache', 
+        'ms-playwright', 
+        f'chromium-{PLAYWRIGHT_BUILD_VERSION}', 
+        'chrome-linux', 
+        'chrome'
+    )
+    # --------------------------------------------------------
+    
     try:
-        # headless=True и args=['--no-sandbox'] обязательны для Render
-        browser = p.chromium.launch(headless=True, args=['--no-sandbox']) 
+        print(f"[PLW] Попытка запуска браузера. Путь: {CHROMIUM_EXECUTABLE_PATH}")
+        
+        # 🔴 ВНЕСЕННЫЕ ИЗМЕНЕНИЯ: executable_path и args
+        browser = p.chromium.launch(
+            headless=True,
+            executable_path=CHROMIUM_EXECUTABLE_PATH,
+            # Обязательно для работы в Linux-контейнерах (Render)
+            args=['--no-sandbox', '--disable-setuid-sandbox']
+        )
+        
         page = browser.new_page()
-        page.set_default_timeout(30000) 
+        page.set_default_timeout(45000) # Увеличен таймаут до 45 секунд
 
         print(f"[PLW] Переход на страницу входа: {LOGIN_URL_PLW}")
         page.goto(LOGIN_URL_PLW, wait_until='domcontentloaded')
@@ -198,7 +226,8 @@ def periodic_fetch():
 # ================== ФУНКЦИИ ПОИСКА (без изменений) ==================
 
 def search_by_iin(iin):
-    r = crm_get(BASE_URL + "by-iin", params={"iin": iin})
+    ENDPOINT = f"{BASE_URL}/api/v2/person-search/by-iin"
+    r = crm_get(ENDPOINT, params={"iin": iin})
     if isinstance(r, str): return r
     
     if r.status_code == 404: 
@@ -217,9 +246,10 @@ def search_by_iin(iin):
     )
 
 def search_by_phone(phone):
+    ENDPOINT = f"{BASE_URL}/api/v2/person-search/by-phone"
     clean = ''.join(filter(str.isdigit, phone))
     if clean.startswith("8"): clean = "7" + clean[1:]
-    r = crm_get(BASE_URL + "by-phone", params={"phone": clean})
+    r = crm_get(ENDPOINT, params={"phone": clean})
     if isinstance(r, str): return r
     if r.status_code == 404: return f"⚠️ Ничего не найдено по номеру {phone}"
     if r.status_code != 200: return f"❌ Ошибка {r.status_code}: {r.text}"
@@ -238,6 +268,7 @@ def search_by_phone(phone):
     )
 
 def search_by_fio(text):
+    ENDPOINT = f"{BASE_URL}/api/v2/person-search/smart"
     if text.startswith(",,"):
         parts = text[2:].strip().split()
         if len(parts) < 2: return "⚠️ Укажите имя и отчество после ',,'"
@@ -250,7 +281,7 @@ def search_by_fio(text):
         if len(parts) >= 3 and parts[2] != "": params["father_name"] = parts[2]
         q = {**params, "smart_mode": "false", "limit": 10}
 
-    r = crm_get(BASE_URL + "smart", params=q)
+    r = crm_get(ENDPOINT, params=q)
     if isinstance(r, str): return r
     if r.status_code == 404: return "⚠️ Ничего не найдено."
     if r.status_code != 200: return f"❌ Ошибка {r.status_code}: {r.text}"
