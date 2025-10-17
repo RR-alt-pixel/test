@@ -1,5 +1,5 @@
 Flask==2.2.5
 gunicorn
 requests
-playwright
 flask-cors
+playwright
