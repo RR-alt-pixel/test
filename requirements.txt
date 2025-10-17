@@ -7,7 +7,7 @@ gunicorn==23.0.0
 requests==2.32.3
 
 # ==== ВЕБ-АВТОМАТИЗАЦИЯ (Playwright) ====
-playwright==1.47.2
+playwright==1.47.0
 
 # ==== УТИЛИТЫ И ТИПЫ ====
 typing-extensions>=4.9.0
