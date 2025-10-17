@@ -42,45 +42,31 @@ token_cycle = None
 
 def login_crm(username, password, p):
     """
-    Выполняет вход через Playwright, используя путь, привязанный к рабочему 
-    каталогу Render (os.getcwd()), чтобы обойти проблемы видимости кеша Gunicorn.
+    Выполняет вход через Playwright, полагаясь на переменную окружения 
+    PLAYWRIGHT_BROWSERS_PATH для автоматического поиска браузера.
     """
     browser = None
     
-    # --- КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ PLAYWRIGHT ДЛЯ RENDER (ФИНАЛЬНЫЙ) ---
-    # Playwright 1.55 использует билд v1187. Используем этот номер.
-    PLAYWRIGHT_BUILD_VERSION = '1187' 
-    
-    # 1. Определяем БАЗОВЫЙ ПУТЬ Playwright, используя os.getcwd() (корень проекта)
-    # Этот путь должен стать доступным после установки переменной среды PLAYWRIGHT_BROWSERS_PATH
-    PLAYWRIGHT_BASE_DIR = os.path.join(os.getcwd(), '.playwright') 
-
-    # 2. Собираем полный путь к исполняемому файлу Headless Shell
-    CHROMIUM_EXECUTABLE_PATH = os.path.join(
-        PLAYWRIGHT_BASE_DIR, 
-        f'chromium_headless_shell-{PLAYWRIGHT_BUILD_VERSION}', 
-        'chrome-linux', 
-        'headless_shell' 
-    )
-    # --------------------------------------------------------
+    # Мы больше не указываем executable_path. Playwright должен найти браузер
+    # автоматически благодаря переменной среды PLAYWRIGHT_BROWSERS_PATH,
+    # которую вы установили на Render.
     
     try:
-        print(f"[PLW] Попытка запуска браузера. Путь: {CHROMIUM_EXECUTABLE_PATH}")
+        print(f"[PLW] Попытка запуска браузера. Ожидаем автоматического поиска...")
         
-        # 🔴 ЗАПУСК: Явно указываем путь и аргументы
+        # 🔴 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: УДАЛЕНО executable_path=...
         browser = p.chromium.launch(
             headless=True,
-            executable_path=CHROMIUM_EXECUTABLE_PATH,
             args=['--no-sandbox', '--disable-setuid-sandbox']
         )
         
         page = browser.new_page()
-        page.set_default_timeout(45000) # Увеличен таймаут до 45 секунд
+        page.set_default_timeout(45000)
 
         print(f"[PLW] Переход на страницу входа: {LOGIN_URL_PLW}")
         page.goto(LOGIN_URL_PLW, wait_until='domcontentloaded')
         
-        # Ввод данных с человеческой задержкой
+        # Ввод данных
         page.type(LOGIN_SELECTOR, username, delay=50) 
         time.sleep(1.0) 
         page.type(PASSWORD_SELECTOR, password, delay=50)
@@ -90,7 +76,7 @@ def login_crm(username, password, p):
         page.click(SIGN_IN_BUTTON_SELECTOR)
         time.sleep(5) 
 
-        # Принудительный переход для инициализации куки
+        # Принудительный переход
         page.goto(DASHBOARD_URL, wait_until='load', timeout=20000)
         time.sleep(3) 
 
@@ -101,22 +87,17 @@ def login_crm(username, password, p):
             cookies_for_requests = '; '.join([f"{c['name']}={c['value']}" for c in cookies])
             user_agent = page.evaluate('navigator.userAgent')
 
-            # Извлекаем CSRF-токен для заголовка X-CSRF-Token
             csrf_token_sec = next((c['value'] for c in cookies if c['name'] == '__Secure-csrf_token'), None)
 
             if csrf_token_sec:
-                # В CSRF-токене часто есть . (точка), API требует только первую часть
                 csrf_value = csrf_token_sec.split('.')[0] 
                 
                 return {
-                    "username": username,
-                    "csrf": csrf_value,
-                    "time": int(time.time()),
-                    "user_agent": user_agent,
-                    "cookie_header": cookies_for_requests 
+                    "username": username, "csrf": csrf_value, "time": int(time.time()),
+                    "user_agent": user_agent, "cookie_header": cookies_for_requests 
                 }
         
-        print(f"[LOGIN PLW FAIL] {username}: Перенаправление не на дашборд или CSRF-токен не найден. URL: {page.url}")
+        print(f"[LOGIN PLW FAIL] {username}: Не удалось войти. URL: {page.url}")
         return None
 
     except Exception as e:
