@@ -52,25 +52,37 @@ token_cycle = None
 def login_crm(username, password, p) -> Optional[Dict]:
     """
     Выполняет вход через Playwright с максимальной оптимизацией для Render.
-    Использует агрессивные флаги и таймауты для экономии ресурсов.
+    Использует агрессивные флаги и уменьшенные таймауты для экономии ресурсов.
     """
     browser = None
     
     try:
         print(f"[PLW] Попытка запуска браузера для {username}...")
         
-        # 1. Запуск с флагами, критичными для Render/Docker
+        # 1. АГРЕССИВНЫЙ ЗАПУСК С МИНИМУМОМ РЕСУРСОВ
         browser = p.chromium.launch(
             headless=True,
+            # Сокращаем таймаут запуска до 15 секунд
+            timeout=15000, 
             args=[
+                # Самые важные флаги для контейнеров:
                 '--no-sandbox', 
                 '--disable-setuid-sandbox',
-                '--disable-gpu',           
-                '--disable-dev-shm-usage', # КРИТИЧЕСКИ ВАЖНО для Render
-                '--single-process',        
-                '--no-zygote'
-            ],
-            timeout=30000 # Макс. 30 секунд на запуск
+                '--disable-dev-shm-usage', # КРИТИЧЕСКИ ВАЖНО
+                
+                # Дополнительные агрессивные флаги:
+                '--disable-accelerated-video-decode',
+                '--disable-accelerated-video-encode',
+                '--disable-gpu-memory-buffer-video-frames',
+                '--single-process',
+                '--no-zygote',
+                
+                # Ограничение потребления памяти (если это сработает)
+                '--max_old_space_size=2048', 
+                
+                # Отключение ненужных функций
+                '--disable-features=site-per-process,Translate,BlinkGenPropertyTrees'
+            ]
         )
         
         # 2. Уменьшенный общий таймаут
@@ -130,7 +142,6 @@ def login_crm(username, password, p) -> Optional[Dict]:
     finally:
         if browser:
             browser.close()
-
 # =========================================================================
 # 2. ФУНКЦИЯ ЗАПУСКА ПУЛА ТОКЕНОВ (С ДИАГНОСТИКОЙ)
 # =========================================================================
