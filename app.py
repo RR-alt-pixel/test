@@ -8,9 +8,10 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS 
 from threading import Thread 
 from playwright.sync_api import sync_playwright # СИНХРОННЫЙ PLAYWRIGHT ДЛЯ FLASK/GUNICORN 
+from typing import Optional, Dict
 import re
 
-# ================== НАСТРОЙКИ И АВТОРИЗАЦИЯ ==================
+# ================== 1. НАСТРОЙКИ И АВТОРИЗАЦИЯ ==================
 
 # 🛑 1. ЗАМЕНИТЕ: Токен вашего рабочего бота
 BOT_TOKEN = "8240195944:AAEQFd2met5meCU1uwu5PvPejJoiKu94cms" 
@@ -22,39 +23,38 @@ ALLOWED_USER_IDS = [0]
 BASE_URL = "https://crm431241.ru" # Упрощенный BASE_URL для удобства
 SECRET_TOKEN = "Refresh-Server-Key-2025-Oct-VK44" 
 
-# ================== НАСТРОЙКИ PLAYWRIGHT ==================
+# ================== 2. НАСТРОЙКИ PLAYWRIGHT ==================
 LOGIN_URL_PLW = f"{BASE_URL}/auth/login" 
 DASHBOARD_URL = f"{BASE_URL}/dashboard" 
-LOGIN_SELECTOR = '#username'      
+LOGIN_SELECTOR = '#username' 
 PASSWORD_SELECTOR = '#password' 
-SIGN_IN_BUTTON_SELECTOR = 'button[type="submit"]' # Исправлен селектор кнопки, если он был неточным
+SIGN_IN_BUTTON_SELECTOR = 'button[type="submit"]' # Исправлен селектор кнопки
 
-# ================== АККАУНТЫ ==================
+# ================== 3. АККАУНТЫ И ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==================
 # Используем blue1, который вы подтвердили, что работает
 accounts = [
     {"username": "blue1", "password": "852dfghm"}, 
 ]
 
+# Глобальные переменные для пула
 token_pool = []
 token_cycle = None
 
-# ================== ЛОГИКА CRM И ТОКЕНЫ (Playwright) ==================
+# ================== 4. МОДЕЛЬ ТОКЕНА (Словарь) ==================
+# Оставляем формат словаря для совместимости с вашим кодом
 
-def login_crm(username, password, p):
+# ================== 5. ЛОГИКА CRM И ТОКЕНЫ (Playwright) ==================
+
+def login_crm(username, password, p) -> Optional[Dict]:
     """
     Выполняет вход через Playwright, полагаясь на переменную окружения 
     PLAYWRIGHT_BROWSERS_PATH для автоматического поиска браузера.
     """
     browser = None
     
-    # Мы больше не указываем executable_path. Playwright должен найти браузер
-    # автоматически благодаря переменной среды PLAYWRIGHT_BROWSERS_PATH,
-    # которую вы установили на Render.
-    
     try:
         print(f"[PLW] Попытка запуска браузера. Ожидаем автоматического поиска...")
         
-        # 🔴 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: УДАЛЕНО executable_path=...
         browser = p.chromium.launch(
             headless=True,
             args=['--no-sandbox', '--disable-setuid-sandbox']
@@ -76,7 +76,7 @@ def login_crm(username, password, p):
         page.click(SIGN_IN_BUTTON_SELECTOR)
         time.sleep(5) 
 
-        # Принудительный переход
+        # Принудительный переход для инициализации куки
         page.goto(DASHBOARD_URL, wait_until='load', timeout=20000)
         time.sleep(3) 
 
@@ -87,16 +87,27 @@ def login_crm(username, password, p):
             cookies_for_requests = '; '.join([f"{c['name']}={c['value']}" for c in cookies])
             user_agent = page.evaluate('navigator.userAgent')
 
+            # --- КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ ЛОГИКИ ТОКЕНА ---
             csrf_token_sec = next((c['value'] for c in cookies if c['name'] == '__Secure-csrf_token'), None)
 
             if csrf_token_sec:
                 csrf_value = csrf_token_sec.split('.')[0] 
+            else:
+                # Если CSRF-токен не найден, используем заглушку, 
+                # но возвращаем полный заголовок куки.
+                print(f"[WARN] {username}: CSRF-токен '__Secure-csrf_token' не найден. Используем заглушку.")
+                csrf_value = "MISSING_CSRF_PLACEHOLDER"
+            # ---------------------------------------------
                 
-                return {
-                    "username": username, "csrf": csrf_value, "time": int(time.time()),
-                    "user_agent": user_agent, "cookie_header": cookies_for_requests 
-                }
+            return {
+                "username": username, 
+                "csrf": csrf_value, 
+                "time": int(time.time()),
+                "user_agent": user_agent, 
+                "cookie_header": cookies_for_requests 
+            }
         
+        # Если не "dashboard", то вход не успешен
         print(f"[LOGIN PLW FAIL] {username}: Не удалось войти. URL: {page.url}")
         return None
 
@@ -108,69 +119,99 @@ def login_crm(username, password, p):
             browser.close()
             
 def init_token_pool():
+    """Инициализирует глобальный пул токенов, авторизуясь через Playwright."""
     global token_pool, token_cycle
     token_pool.clear()
     
-    # Запускаем Playwright один раз для инициализации всех аккаунтов
+    print("🔐 Авторизация всех аккаунтов (запустит Playwright)...")
+    
     with sync_playwright() as p:
         for acc in accounts:
             tok = login_crm(acc["username"], acc["password"], p)
             if tok:
                 token_pool.append(tok)
-                
+                print(f"[POOL] Аккаунт {tok['username']} успешно авторизован.")
+            else:
+                print(f"[POOL] Аккаунт {acc['username']} не смог авторизоваться.")
+        
     if not token_pool:
-        print("❌ Нет активных токенов! Проверьте аккаунты и Playwright.")
+        print("❌ Пул токенов пуст! Проверьте аккаунты и Playwright.")
+        token_cycle = None
     else:
         token_cycle = itertools.cycle(token_pool)
         print(f"[POOL] Успешно загружено {len(token_pool)} токенов (через Playwright) ✅")
 
-def crm_get(endpoint, params=None):
+def get_next_token() -> Optional[Dict]:
+    """Возвращает следующий токен из пула, или None."""
     global token_cycle, token_pool
+    
     if not token_cycle:
         print("[AUTH] Пул токенов пуст. Попытка инициализации...")
         init_token_pool()
-
-    if not token_pool:
-        return "❌ Ошибка: Нет доступных токенов CRM."
-
-    token = next(token_cycle)
-    
-    # Используем данные, захваченные Playwright
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": token["user_agent"], 
-        "Cookie": token["cookie_header"], # Полная рабочая строка куки
-        "X-CSRF-Token": token["csrf"]
-    }
-
-    try:
-        r = requests.get(endpoint, headers=headers, params=params, timeout=15)
-    except Exception as e:
-        return f"❌ Ошибка соединения: {e}"
-
-    if r.status_code in (401, 403):
-        print(f"[AUTH] {token['username']} → токен устарел, попытка перелогина...")
-        
-        acc_info = next((acc for acc in accounts if acc["username"] == token["username"]), None)
-        if acc_info:
-            # ПЕРЕЛОГИН ТОЖЕ ЧЕРЕЗ PLAYWRIGHT
-            with sync_playwright() as p:
-                new_t = login_crm(acc_info["username"], acc_info["password"], p)
+        if not token_cycle:
+            return None
             
-            if new_t:
-                idx = next((i for i, t in enumerate(token_pool) if t["username"] == token["username"]), None)
-                if idx is not None:
-                    token_pool[idx] = new_t
-                token_cycle = itertools.cycle(token_pool)
-                print(f"[AUTH] {token['username']} обновлён ✅")
-                return crm_get(endpoint, params) # Повторяем запрос
-            else:
-                print(f"[AUTH FAIL] {token['username']} не смог обновиться.")
-    
-    return r
+    try:
+        return next(token_cycle)
+    except StopIteration:
+        # Этого не должно случиться с itertools.cycle, но для безопасности
+        return None
 
-# ================== ЛОГИКА ДИНАМИЧЕСКОЙ ЗАГРУЗКИ ID (без изменений) ==================
+def crm_get(endpoint, params=None):
+    """
+    Выполняет API-запрос, используя токен из пула, с обработкой 401/403 и 
+    автоматической повторной авторизацией.
+    """
+    for _ in range(2): # 2 попытки: текущий токен и новый после релогина
+        token = get_next_token()
+        if not token:
+            return "❌ Ошибка: Нет доступных токенов CRM."
+
+        # Используем данные, захваченные Playwright
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": token["user_agent"], 
+            "Cookie": token["cookie_header"], # Полная рабочая строка куки
+        }
+        
+        # Добавляем CSRF только если это не заглушка
+        if token["csrf"] != "MISSING_CSRF_PLACEHOLDER":
+             headers["X-CSRF-Token"] = token["csrf"]
+
+        url = f"{BASE_URL}{endpoint}" # Добавляем BASE_URL к эндпоинту
+        
+        try:
+            r = requests.get(url, headers=headers, params=params, timeout=15)
+        except Exception as e:
+            return f"❌ Ошибка соединения: {e}"
+
+        if r.status_code in (401, 403):
+            print(f"[AUTH] {token['username']} → токен устарел, попытка перелогина...")
+            
+            acc_info = next((acc for acc in accounts if acc["username"] == token["username"]), None)
+            if acc_info:
+                # ПЕРЕЛОГИН ЧЕРЕЗ PLAYWRIGHT
+                with sync_playwright() as p:
+                    new_t = login_crm(acc_info["username"], acc_info["password"], p)
+                
+                if new_t:
+                    # Обновляем токен в пуле
+                    idx = next((i for i, t in enumerate(token_pool) if t["username"] == token["username"]), None)
+                    if idx is not None:
+                        token_pool[idx] = new_t
+                    token_cycle = itertools.cycle(token_pool) # Пересоздаем цикл
+                    print(f"[AUTH] {token['username']} обновлён ✅")
+                    continue # Повторяем внешний цикл (с новым токеном)
+                else:
+                    print(f"[AUTH FAIL] {token['username']} не смог обновиться.")
+        
+        # Если не 401/403 или после релогина не сработал continue
+        return r
+    
+    return "❌ Ошибка: Не удалось получить данные после повторной авторизации." # Если 2 попытки провалились
+
+# ================== 6. ЛОГИКА ДИНАМИЧЕСКОЙ ЗАГРУЗКИ ID (без изменений) ==================
 LAST_FETCH_TIME = 0
 FETCH_INTERVAL = 3600
 
@@ -199,15 +240,13 @@ def fetch_allowed_users():
 
 def periodic_fetch():
     while True:
-        if int(time.time()) - LAST_FETCH_TIME >= FETCH_INTERVAL:
-            fetch_allowed_users()
+        fetch_allowed_users()
         time.sleep(FETCH_INTERVAL) 
 
-
-# ================== ФУНКЦИИ ПОИСКА (без изменений) ==================
+# ================== 7. ФУНКЦИИ ПОИСКА (с коррекцией BASE_URL) ==================
 
 def search_by_iin(iin):
-    ENDPOINT = f"{BASE_URL}/api/v2/person-search/by-iin"
+    ENDPOINT = "/api/v2/person-search/by-iin" # Исправлено: только эндпоинт
     r = crm_get(ENDPOINT, params={"iin": iin})
     if isinstance(r, str): return r
     
@@ -227,7 +266,7 @@ def search_by_iin(iin):
     )
 
 def search_by_phone(phone):
-    ENDPOINT = f"{BASE_URL}/api/v2/person-search/by-phone"
+    ENDPOINT = "/api/v2/person-search/by-phone" # Исправлено: только эндпоинт
     clean = ''.join(filter(str.isdigit, phone))
     if clean.startswith("8"): clean = "7" + clean[1:]
     r = crm_get(ENDPOINT, params={"phone": clean})
@@ -249,7 +288,7 @@ def search_by_phone(phone):
     )
 
 def search_by_fio(text):
-    ENDPOINT = f"{BASE_URL}/api/v2/person-search/smart"
+    ENDPOINT = "/api/v2/person-search/smart" # Исправлено: только эндпоинт
     if text.startswith(",,"):
         parts = text[2:].strip().split()
         if len(parts) < 2: return "⚠️ Укажите имя и отчество после ',,'"
@@ -282,7 +321,7 @@ def search_by_fio(text):
         )
     return "📌 Результаты поиска по ФИО:\n\n" + "\n".join(results)
 
-# ================== API ENDPOINT (Flask) ==================
+# ================== 8. API ENDPOINT (Flask) ==================
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}) 
 
@@ -301,6 +340,9 @@ def api_search():
     except ValueError:
         return jsonify({"error": "Неверный формат ID пользователя."}), 403
     
+    if not token_pool:
+        return jsonify({"error": "Сервис не готов. Нет активных токенов CRM."}), 400
+        
     query = data.get('query', '').strip()
     
     if not query:
@@ -314,6 +356,7 @@ def api_search():
         reply = search_by_fio(query)
 
     if reply.startswith('❌') or reply.startswith('⚠️'):
+        # При ошибке возвращаем 400, чтобы фронтенд мог обработать
         return jsonify({"error": reply.replace("❌ ", "").replace("⚠️ ", "")}), 400
         
     return jsonify({"result": reply})
@@ -334,20 +377,19 @@ def refresh_users():
         "loaded_count": len(ALLOWED_USER_IDS)
     }), 200
 
-
-# ================== ЗАПУСК ИНИЦИАЛИЗАЦИИ ==================
+# ================== 9. ЗАПУСК ИНИЦИАЛИЗАЦИИ ==================
 
 print("--- 🔴 DEBUG: НАЧАЛО ЗАПУСКА API 🔴 ---")
-# 1. Запуск фонового обновления списка ID
-print("🔄 Запуск фонового обновления списка ID...")
-Thread(target=periodic_fetch, daemon=True).start() 
-# 2. Инициализация разрешенных ID
+# 1. Инициализация разрешенных ID (нужно для первых проверок)
 print("🔐 Первая загрузка списка ID...")
 fetch_allowed_users() 
+# 2. Запуск фонового обновления списка ID
+print("🔄 Запуск фонового обновления списка ID...")
+Thread(target=periodic_fetch, daemon=True).start() 
 # 3. Инициализация токенов (запустит Playwright)
 print("🔐 Авторизация всех аккаунтов (запустит Playwright)...")
-# Запускаем в отдельном потоке, чтобы Gunicorn мог запуститься
 Thread(target=init_token_pool, daemon=True).start() 
+
 print("🚀 API-сервер готов к приему запросов.")
 
 # ================== ЗАПУСК (ТОЛЬКО ДЛЯ ЛОКАЛЬНОГО ТЕСТИРОВАНИЯ) ==================
