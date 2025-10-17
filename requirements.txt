@@ -1,5 +1,13 @@
-Flask==2.2.5
-gunicorn
-requests
-flask-cors
-playwright
+# ==== ОСНОВНОЕ ВЕБ-ПРИЛОЖЕНИЕ ====
+Flask==3.0.3
+flask-cors==4.0.1
+gunicorn==23.0.0
+
+# ==== HTTP-КЛИЕНТЫ ====
+requests==2.32.3
+
+# ==== ВЕБ-АВТОМАТИЗАЦИЯ (Playwright) ====
+playwright==1.47.2
+
+# ==== УТИЛИТЫ И ТИПЫ ====
+typing-extensions>=4.9.0
