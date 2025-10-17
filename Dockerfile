@@ -1,35 +1,26 @@
-# ==============================
-# 📦 1. БАЗОВЫЙ ОБРАЗ
-# ==============================
+# ---------- БАЗА ----------
 FROM python:3.11-slim
 
-# ==============================
-# ⚙️ 2. УСТАНОВКА СИСТЕМНЫХ ЗАВИСИМОСТЕЙ
-# ==============================
-COPY apt-packages.txt .
-
+# ---------- УСТАНОВКА СИСТЕМНЫХ ПАКЕТОВ ----------
 RUN apt-get update && \
-    xargs apt-get install -y --no-install-recommends -f < apt-packages.txt && \
+    apt-get install -y --no-install-recommends \
+    curl wget gnupg ca-certificates fonts-liberation \
+    libasound2 libatk-bridge2.0-0 libatk1.0-0 libcups2 libdrm2 \
+    libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+    libgbm1 libgtk-3-0 libnss3 libxshmfence1 libx11-xcb1 \
+    libxext6 libx11-6 libpangocairo-1.0-0 libpango-1.0-0 \
+    fonts-noto-color-emoji fonts-unifont && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# ==============================
-# 🧱 3. УСТАНОВКА PYTHON-ПАКЕТОВ
-# ==============================
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# ==============================
-# 📂 4. КОПИРУЕМ ПРОЕКТ
-# ==============================
+# ---------- РАБОЧАЯ ПАПКА ----------
 WORKDIR /app
 COPY . .
 
-# ==============================
-# 🔑 5. ДОБАВЛЯЕМ ПРАВА НА start.sh
-# ==============================
-RUN chmod +x start.sh
+# ---------- УСТАНОВКА PYTHON-ПАКЕТОВ ----------
+RUN pip install --no-cache-dir -r requirements.txt
 
-# ==============================
-# 🚀 6. ЗАПУСК
-# ==============================
-CMD ["./start.sh"]
+# ---------- УСТАНОВКА БРАУЗЕРА PLAYWRIGHT ----------
+RUN python -m playwright install chromium
+
+# ---------- СТАРТ ----------
+CMD ["bash", "start.sh"]
