@@ -1,390 +1,172 @@
 # -*- coding: utf-8 -*-
-import requests
-import json
 import os
+import json
 import time
 import itertools
-from flask import Flask, request, jsonify 
-from flask_cors import CORS 
-from threading import Thread 
-from playwright.sync_api import sync_playwright # СИНХРОННЫЙ PLAYWRIGHT ДЛЯ FLASK/GUNICORN 
-from typing import Optional, Dict
-import re
+import requests
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
+from playwright.sync_api import sync_playwright
 
-# ================== 1. НАСТРОЙКИ И АВТОРИЗАЦИЯ ==================
+# ================== 1. НАСТРОЙКИ ==================
+BOT_TOKEN = "8240195944:AAEQFd2met5meCU1uwu5PvPejJoiKu94cms"
+BASE_URL = "https://crm431241.ru"
+SECRET_TOKEN = "Refresh-Server-Key-2025-Oct-VK44"
+ALLOWED_IDS_PATH = "allowed_ids.json"  # локальный путь
+CRM_USER = "blue1"
+CRM_PASS = "852dfghm"
 
-# 🛑 1. ЗАМЕНИТЕ: Токен вашего рабочего бота
-BOT_TOKEN = "8240195944:AAEQFd2met5meCU1uwu5PvPejJoiKu94cms" 
+# ================== 2. FLASK ==================
+app = Flask(__name__, static_folder="public", static_url_path="")
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# 🟢 2. URL НА ВАШ ВНЕШНИЙ JSON-ФАЙЛ СО СПИСКОМ ID
-ALLOWED_USERS_URL = "https://raw.githubusercontent.com/RR-alt-pixel/test/refs/heads/main/allowed_ids.json" 
-ALLOWED_USER_IDS = [0] 
-
-BASE_URL = "https://crm431241.ru" # Упрощенный BASE_URL для удобства
-SECRET_TOKEN = "Refresh-Server-Key-2025-Oct-VK44" 
-
-# ================== 2. НАСТРОЙКИ PLAYWRIGHT ==================
-LOGIN_URL_PLW = f"{BASE_URL}/auth/login" 
-DASHBOARD_URL = f"{BASE_URL}/dashboard" 
-LOGIN_SELECTOR = '#username' 
-PASSWORD_SELECTOR = '#password' 
-SIGN_IN_BUTTON_SELECTOR = 'button[type="submit"]' # Исправлен селектор кнопки
-
-# ================== 3. АККАУНТЫ И ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==================
-# Используем blue1, который вы подтвердили, что работает
-accounts = [
-    {"username": "blue1", "password": "852dfghm"}, 
-]
-
-# Глобальные переменные для пула
+# ================== 3. ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==================
 token_pool = []
 token_cycle = None
+allowed_user_ids = []
 
-# ================== 4. МОДЕЛЬ ТОКЕНА (Словарь) ==================
-# Оставляем формат словаря для совместимости с вашим кодом
-
-# ================== 5. ЛОГИКА CRM И ТОКЕНЫ (Playwright) ==================
-
-# ================== ЛОГИКА CRM И ТОКЕНЫ (Playwright) ==================
-
-# ================== ОПТИМИЗИРОВАННАЯ ФУНКЦИЯ LOGIN_CRM ==================
-
-def login_crm(username, password, p) -> Optional[Dict]:
-    """
-    Выполняет вход через Playwright с максимальной оптимизацией для Render.
-    Использует агрессивные флаги и уменьшенные таймауты для экономии ресурсов.
-    """
-    browser = None
-    
+# ================== 4. ЗАГРУЗКА ДОПУСТИМЫХ ID ==================
+def load_allowed_users():
+    global allowed_user_ids
     try:
-        print(f"[PLW] Попытка запуска браузера для {username}...")
-        
-        # 1. АГРЕССИВНЫЙ ЗАПУСК С МИНИМУМОМ РЕСУРСОВ
+        with open(ALLOWED_IDS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            allowed_user_ids = data.get("allowed_users", [])
+            print(f"[AUTH] Загружено {len(allowed_user_ids)} разрешённых ID.")
+    except Exception as e:
+        print(f"[AUTH ERROR] Не удалось загрузить allowed_ids.json: {e}")
+        allowed_user_ids = []
+
+# ================== 5. PLAYWRIGHT ЛОГИН ==================
+def login_crm(username, password, p):
+    browser = None
+    try:
         browser = p.chromium.launch(
             headless=True,
-            # Сокращаем таймаут запуска до 15 секунд
-            timeout=15000, 
             args=[
-                # Самые важные флаги для контейнеров:
-                '--no-sandbox', 
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage', # КРИТИЧЕСКИ ВАЖНО
-                
-                # Дополнительные агрессивные флаги:
-                '--disable-accelerated-video-decode',
-                '--disable-accelerated-video-encode',
-                '--disable-gpu-memory-buffer-video-frames',
-                '--single-process',
-                '--no-zygote',
-                
-                # Ограничение потребления памяти (если это сработает)
-                '--max_old_space_size=2048', 
-                
-                # Отключение ненужных функций
-                '--disable-features=site-per-process,Translate,BlinkGenPropertyTrees'
-            ]
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--single-process",
+                "--no-zygote"
+            ],
+            timeout=30000
         )
-        
-        # 2. Уменьшенный общий таймаут
         page = browser.new_page()
-        page.set_default_timeout(25000) # Общий таймаут 25 сек.
+        page.goto(f"{BASE_URL}/auth/login", wait_until="load")
+        page.fill("#username", username)
+        page.fill("#password", password)
+        page.click("button[type=submit]")
+        page.wait_for_load_state("networkidle")
+        page.goto(f"{BASE_URL}/dashboard", wait_until="domcontentloaded")
 
-        print(f"[PLW] Переход на страницу входа: {LOGIN_URL_PLW}")
-        # Таймаут на загрузку страницы
-        page.goto(LOGIN_URL_PLW, wait_until='load', timeout=15000) 
-        
-        # Ввод данных
-        page.type(LOGIN_SELECTOR, username, delay=50) 
-        time.sleep(1.0) 
-        page.type(PASSWORD_SELECTOR, password, delay=50)
-        time.sleep(1.0) 
+        if "dashboard" not in page.url:
+            print(f"[LOGIN FAIL] {username}")
+            return None
 
-        # Отправка формы
-        page.click(SIGN_IN_BUTTON_SELECTOR)
-        time.sleep(4) 
-
-        # Принудительный переход
-        page.goto(DASHBOARD_URL, wait_until='domcontentloaded', timeout=10000)
-        time.sleep(1) 
-
-        if "dashboard" in page.url:
-            print(f"[LOGIN PLW] {username} ✅ Вход успешен. URL: {page.url}")
-            
-            # --- СБОР ИНФОРМАЦИИ ---
-            cookies = page.context.cookies()
-            cookies_for_requests = '; '.join([f"{c['name']}={c['value']}" for c in cookies])
-            user_agent = page.evaluate('navigator.userAgent')
-
-            csrf_token_sec = next((c['value'] for c in cookies if c['name'] == '__Secure-csrf_token'), None)
-
-            csrf_value = None
-            if csrf_token_sec:
-                # Предполагаем, что CSRF-токен находится в куках
-                csrf_value = csrf_token_sec.split('.')[0]
-            # --- КОНЕЦ СБОРА ---
-            
-            # Возвращаем собранные данные
-            return { 
-                "username": username, 
-                "csrf": csrf_value, 
-                "time": int(time.time()),
-                "user_agent": user_agent, 
-                "cookie_header": cookies_for_requests 
-            }
-        
-        print(f"[LOGIN PLW FAIL] {username}: Не удалось войти. URL: {page.url}")
-        return None
-
+        cookies = page.context.cookies()
+        cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+        user_agent = page.evaluate("navigator.userAgent")
+        csrf_token = next((c["value"] for c in cookies if c["name"] == "__Secure-csrf_token"), None)
+        print(f"[LOGIN OK] {username}")
+        return {"username": username, "csrf": csrf_token, "user_agent": user_agent, "cookie_header": cookie_header}
     except Exception as e:
-        # Здесь мы увидим ошибки таймаута или навигации
-        print(f"[LOGIN PLW ERR] {username}: {type(e).__name__}: {e}")
+        print(f"[LOGIN ERROR] {username}: {e}")
         return None
     finally:
         if browser:
             browser.close()
-# =========================================================================
-# 2. ФУНКЦИЯ ЗАПУСКА ПУЛА ТОКЕНОВ (С ДИАГНОСТИКОЙ)
-# =========================================================================
 
 def init_token_pool():
-    global TOKEN_POOL
-    
-    # Заглушка для имитации загрузки ID
-    print("🔐 Первая загрузка списка ID...")
-    print("[AUTH-LOG] УСПЕХ! Загружено 127 разрешенных ID.")
-    
-    # --- ЭТОТ ЛОГ ВЫ УЖЕ ВИДЕЛИ ---
-    print("🔐 Авторизация всех аккаунтов (запустит Playwright)...")
+    global token_pool, token_cycle
+    with sync_playwright() as p:
+        print("[INIT] Авторизация CRM...")
+        token = login_crm(CRM_USER, CRM_PASS, p)
+        if token:
+            token_pool = [token]
+            token_cycle = itertools.cycle(token_pool)
+            print("[INIT OK] Токен успешно получен.")
+        else:
+            print("[INIT FAIL] Ошибка входа в CRM.")
 
-    # --- НОВЫЙ ДИАГНОСТИЧЕСКИЙ ЛОГ 1 ---
-    print("✨ [DIAG] Playwright: Начинаем попытку запуска sync_playwright...")
-    
-    try:
-        # КРИТИЧЕСКИ ВАЖНЫЙ БЛОК: здесь происходит сбой
-        with sync_playwright() as p:
-            
-            # --- НОВЫЙ ДИАГНОСТИЧЕСКИЙ ЛОГ 2 (Критически важен) ---
-            print("✅ [DIAG] Playwright: Успешно запущен. Начинаем итерацию по аккаунтам...")
-            
-            new_pool = {}
-            for username, password in ACCOUNTS:
-                token_data = login_crm(username, password, p)
-                if token_data:
-                    new_pool[username] = token_data
-                
-            TOKEN_POOL = new_pool
-            print(f"🔄 [DIAG] Playwright: Все аккаунты обработаны. Пул обновлен: {len(TOKEN_POOL)} токенов.")
-            
-    except Exception as e:
-        # Если Playwright падает до того, как его поймает login_crm
-        print(f"❌ КРИТИЧЕСКАЯ ОШИБКА В init_token_pool: {type(e).__name__}: {e}")
-    
-    # ... (Ваша логика для фонового обновления, если она есть)
-    print("🚀 API-сервер готов к приему запросов.")
-def get_next_token() -> Optional[Dict]:
-    """Возвращает следующий токен из пула, или None."""
-    global token_cycle, token_pool
-    
+def get_next_token():
+    global token_cycle
     if not token_cycle:
-        print("[AUTH] Пул токенов пуст. Попытка инициализации...")
         init_token_pool()
-        if not token_cycle:
-            return None
-            
-    try:
+    if token_cycle:
         return next(token_cycle)
-    except StopIteration:
-        # Этого не должно случиться с itertools.cycle, но для безопасности
-        return None
+    return None
 
 def crm_get(endpoint, params=None):
-    """
-    Выполняет API-запрос, используя токен из пула, с обработкой 401/403 и 
-    автоматической повторной авторизацией.
-    """
-    for _ in range(2): # 2 попытки: текущий токен и новый после релогина
-        token = get_next_token()
-        if not token:
-            return "❌ Ошибка: Нет доступных токенов CRM."
+    token = get_next_token()
+    if not token:
+        return None
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": token["user_agent"],
+        "Cookie": token["cookie_header"]
+    }
+    if token.get("csrf"):
+        headers["X-CSRF-Token"] = token["csrf"]
 
-        # Используем данные, захваченные Playwright
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "User-Agent": token["user_agent"], 
-            "Cookie": token["cookie_header"], # Полная рабочая строка куки
-        }
-        
-        # Добавляем CSRF только если это не заглушка
-        if token["csrf"] != "MISSING_CSRF_PLACEHOLDER":
-             headers["X-CSRF-Token"] = token["csrf"]
+    return requests.get(f"{BASE_URL}{endpoint}", headers=headers, params=params, timeout=20)
 
-        url = f"{BASE_URL}{endpoint}" # Добавляем BASE_URL к эндпоинту
-        
-        try:
-            r = requests.get(url, headers=headers, params=params, timeout=15)
-        except Exception as e:
-            return f"❌ Ошибка соединения: {e}"
-
-        if r.status_code in (401, 403):
-            print(f"[AUTH] {token['username']} → токен устарел, попытка перелогина...")
-            
-            acc_info = next((acc for acc in accounts if acc["username"] == token["username"]), None)
-            if acc_info:
-                # ПЕРЕЛОГИН ЧЕРЕЗ PLAYWRIGHT
-                with sync_playwright() as p:
-                    new_t = login_crm(acc_info["username"], acc_info["password"], p)
-                
-                if new_t:
-                    # Обновляем токен в пуле
-                    idx = next((i for i, t in enumerate(token_pool) if t["username"] == token["username"]), None)
-                    if idx is not None:
-                        token_pool[idx] = new_t
-                    token_cycle = itertools.cycle(token_pool) # Пересоздаем цикл
-                    print(f"[AUTH] {token['username']} обновлён ✅")
-                    continue # Повторяем внешний цикл (с новым токеном)
-                else:
-                    print(f"[AUTH FAIL] {token['username']} не смог обновиться.")
-        
-        # Если не 401/403 или после релогина не сработал continue
-        return r
-    
-    return "❌ Ошибка: Не удалось получить данные после повторной авторизации." # Если 2 попытки провалились
-
-# ================== 6. ЛОГИКА ДИНАМИЧЕСКОЙ ЗАГРУЗКИ ID (без изменений) ==================
-LAST_FETCH_TIME = 0
-FETCH_INTERVAL = 3600
-
-def fetch_allowed_users():
-    global ALLOWED_USER_IDS, LAST_FETCH_TIME
-    print("[AUTH-LOG] Начало попытки загрузки ID.")
-    try:
-        response = requests.get(ALLOWED_USERS_URL, timeout=10) 
-        print(f"[AUTH-LOG] Статус код от GitHub: {response.status_code}")
-        
-        if response.status_code == 200:
-            data = response.json()
-            new_list = [int(i) for i in data.get("allowed_users", [])]
-            
-            if new_list:
-                ALLOWED_USER_IDS = new_list
-                LAST_FETCH_TIME = int(time.time())
-                print(f"[AUTH-LOG] УСПЕХ! Загружено {len(ALLOWED_USER_IDS)} разрешенных ID.")
-            else:
-                print("[AUTH-LOG ERROR] Список ID пуст в источнике.")
-        else:
-            print(f"[AUTH-LOG ERROR] Не удалось загрузить список ID. Статус: {response.status_code}")
-            
-    except Exception as e:
-        print(f"[AUTH-LOG CRITICAL ERROR] Исключение при загрузке: {e}")
-
-def periodic_fetch():
-    while True:
-        fetch_allowed_users()
-        time.sleep(FETCH_INTERVAL) 
-
-# ================== 7. ФУНКЦИИ ПОИСКА (с коррекцией BASE_URL) ==================
-
+# ================== 6. ПОИСКОВЫЕ ФУНКЦИИ ==================
 def search_by_iin(iin):
-    ENDPOINT = "/api/v2/person-search/by-iin" # Исправлено: только эндпоинт
-    r = crm_get(ENDPOINT, params={"iin": iin})
-    if isinstance(r, str): return r
-    
-    if r.status_code == 404: 
-        return "⚠️ Ничего не найдено по ИИН."
-    if r.status_code != 200: return f"❌ Ошибка {r.status_code}: {r.text}"
-    
+    r = crm_get("/api/v2/person-search/by-iin", {"iin": iin})
+    if not r:
+        return "❌ Ошибка связи с CRM"
+    if r.status_code == 404:
+        return "⚠️ Не найдено"
+    if r.status_code != 200:
+        return f"❌ Ошибка {r.status_code}: {r.text}"
     p = r.json()
-    return (
-        f"👤 <b>{p.get('snf','')}</b>\n"
-        f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
-        f"📅 Дата рождения: {p.get('birthday','')}\n"
-        f"🚻 Пол: {p.get('sex','')}\n"
-        f"🌍 Национальность: {p.get('nationality','')}\n"
-        f"📱 Телефон: {p.get('phone_number','')}\n"
-        f"🏠 Адрес: {p.get('address','')}"
-    )
+    return f"👤 {p.get('snf','')}\n🧾 {p.get('iin','')}\n📅 {p.get('birthday','')}\n📱 {p.get('phone_number','')}"
 
 def search_by_phone(phone):
-    ENDPOINT = "/api/v2/person-search/by-phone" # Исправлено: только эндпоинт
-    clean = ''.join(filter(str.isdigit, phone))
-    if clean.startswith("8"): clean = "7" + clean[1:]
-    r = crm_get(ENDPOINT, params={"phone": clean})
-    if isinstance(r, str): return r
-    if r.status_code == 404: return f"⚠️ Ничего не найдено по номеру {phone}"
-    if r.status_code != 200: return f"❌ Ошибка {r.status_code}: {r.text}"
-    
-    data = r.json()
-    if not data: return f"⚠️ Ничего не найдено по номеру {phone}"
-    p = data[0] if isinstance(data, list) else data
-    return (
-        f"👤 <b>{p.get('snf','')}</b>\n"
-        f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
-        f"📅 Дата рождения: {p.get('birthday','')}\n"
-        f"🚻 Пол: {p.get('sex','')}\n"
-        f"🌍 Национальность: {p.get('nationality','')}\n"
-        f"📱 Телефон: {p.get('phone_number','')}\n"
-        f"🏠 Адрес: {p.get('address','')}"
-    )
+    clean = "".join(filter(str.isdigit, phone))
+    if clean.startswith("8"):
+        clean = "7" + clean[1:]
+    r = crm_get("/api/v2/person-search/by-phone", {"phone": clean})
+    if not r:
+        return "❌ Ошибка связи с CRM"
+    if r.status_code == 404:
+        return "⚠️ Не найдено"
+    if r.status_code != 200:
+        return f"❌ Ошибка {r.status_code}: {r.text}"
+    p = r.json()[0] if isinstance(r.json(), list) else r.json()
+    return f"👤 {p.get('snf','')}\n🧾 {p.get('iin','')}\n📅 {p.get('birthday','')}\n📱 {p.get('phone_number','')}"
 
 def search_by_fio(text):
-    ENDPOINT = "/api/v2/person-search/smart" # Исправлено: только эндпоинт
-    if text.startswith(",,"):
-        parts = text[2:].strip().split()
-        if len(parts) < 2: return "⚠️ Укажите имя и отчество после ',,'"
-        q = {"name": parts[0], "father_name": " ".join(parts[1:]), "smart_mode": "false", "limit": 10}
-    else:
-        parts = text.split(" ")
-        params = {}
-        if len(parts) >= 1 and parts[0] != "": params["surname"] = parts[0]
-        if len(parts) >= 2 and parts[1] != "": params["name"] = parts[1]
-        if len(parts) >= 3 and parts[2] != "": params["father_name"] = parts[2]
-        q = {**params, "smart_mode": "false", "limit": 10}
-
-    r = crm_get(ENDPOINT, params=q)
-    if isinstance(r, str): return r
-    if r.status_code == 404: return "⚠️ Ничего не найдено."
-    if r.status_code != 200: return f"❌ Ошибка {r.status_code}: {r.text}"
-    
+    parts = text.split()
+    params = {"smart_mode": "false", "limit": 10}
+    if len(parts) >= 1: params["surname"] = parts[0]
+    if len(parts) >= 2: params["name"] = parts[1]
+    if len(parts) >= 3: params["father_name"] = parts[2]
+    r = crm_get("/api/v2/person-search/smart", params)
+    if not r:
+        return "❌ Ошибка связи с CRM"
+    if r.status_code == 404:
+        return "⚠️ Не найдено"
+    if r.status_code != 200:
+        return f"❌ Ошибка {r.status_code}: {r.text}"
     data = r.json()
-    if not data: return "⚠️ Ничего не найдено."
-    if isinstance(data, dict): data = [data]
-    
-    results = []
-    for i, p in enumerate(data[:10], start=1):
-        results.append(
-            f"{i}. 👤 <b>{p.get('snf','')}</b>\n"
-            f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
-            f"📅 Дата рождения: {p.get('birthday','')}\n"
-            f"🚻 Пол: {p.get('sex','')}\n"
-            f"🌍 Национальность: {p.get('nationality','')}"
-        )
-    return "📌 Результаты поиска по ФИО:\n\n" + "\n".join(results)
+    if isinstance(data, dict):
+        data = [data]
+    results = [f"{p.get('snf','')} — {p.get('iin','')} — {p.get('birthday','')}" for p in data[:10]]
+    return "\n".join(results)
 
-# ================== 8. API ENDPOINT (Flask) ==================
-app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}}) 
-
-@app.route('/api/search', methods=['POST'])
+# ================== 7. API ==================
+@app.route("/api/search", methods=["POST"])
 def api_search():
     data = request.json
-    user_id = data.get('telegram_user_id')
-    
-    if user_id is None:
-        return jsonify({"error": "Ошибка авторизации: ID пользователя не найден."}), 403
+    user_id = data.get("telegram_user_id")
+    if not user_id:
+        return jsonify({"error": "ID пользователя не передан"}), 403
+    if int(user_id) not in allowed_user_ids:
+        return jsonify({"error": "Нет доступа"}), 403
 
-    try:
-        if int(user_id) not in ALLOWED_USER_IDS:
-            print(f"❌ Доступ запрещен для ID: {user_id}")
-            return jsonify({"error": "У вас нет доступа к этому приложению."}), 403
-    except ValueError:
-        return jsonify({"error": "Неверный формат ID пользователя."}), 403
-    
-    if not token_pool:
-        return jsonify({"error": "Сервис не готов. Нет активных токенов CRM."}), 400
-        
-    query = data.get('query', '').strip()
-    
+    query = data.get("query", "").strip()
     if not query:
         return jsonify({"error": "Пустой запрос"}), 400
 
@@ -395,43 +177,19 @@ def api_search():
     else:
         reply = search_by_fio(query)
 
-    if reply.startswith('❌') or reply.startswith('⚠️'):
-        # При ошибке возвращаем 400, чтобы фронтенд мог обработать
-        return jsonify({"error": reply.replace("❌ ", "").replace("⚠️ ", "")}), 400
-        
     return jsonify({"result": reply})
 
+# ================== 8. ВЕБ-СТРАНИЦА ==================
+@app.route("/")
+def serve_index():
+    return send_from_directory(app.static_folder, "index.html")
 
-@app.route('/api/refresh-users', methods=['POST'])
-def refresh_users():
-    auth_header = request.headers.get('Authorization')
-    if auth_header != f"Bearer {SECRET_TOKEN}":
-        return jsonify({"error": "Неверный секретный токен. Доступ запрещен."}), 403
+@app.route("/<path:path>")
+def serve_static(path):
+    return send_from_directory(app.static_folder, path)
 
-    print("[AUTH-LOG] Принудительное обновление списка ID запущено вручную.")
-    fetch_allowed_users()
-    
-    return jsonify({
-        "status": "success", 
-        "message": "Список разрешенных пользователей обновлен немедленно.",
-        "loaded_count": len(ALLOWED_USER_IDS)
-    }), 200
-
-# ================== 9. ЗАПУСК ИНИЦИАЛИЗАЦИИ ==================
-
-print("--- 🔴 DEBUG: НАЧАЛО ЗАПУСКА API 🔴 ---")
-# 1. Инициализация разрешенных ID (нужно для первых проверок)
-print("🔐 Первая загрузка списка ID...")
-fetch_allowed_users() 
-# 2. Запуск фонового обновления списка ID
-print("🔄 Запуск фонового обновления списка ID...")
-Thread(target=periodic_fetch, daemon=True).start() 
-# 3. Инициализация токенов (запустит Playwright)
-print("🔐 Авторизация всех аккаунтов (запустит Playwright)...")
-Thread(target=init_token_pool, daemon=True).start() 
-
-print("🚀 API-сервер готов к приему запросов.")
-
-# ================== ЗАПУСК (ТОЛЬКО ДЛЯ ЛОКАЛЬНОГО ТЕСТИРОВАНИЯ) ==================
+# ================== 9. ЗАПУСК ==================
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5000)
+    load_allowed_users()
+    init_token_pool()
+    app.run(host="0.0.0.0", port=8000)
