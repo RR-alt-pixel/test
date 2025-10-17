@@ -1,0 +1,4 @@
+libnss3
+libx11-xcb1
+libasound2
+libgbm-dev
