@@ -155,7 +155,7 @@ def crm_get(endpoint: str, params: dict = None):
     for attempt in range(2):
         token = get_next_token()
         if not token:
-            return "❌ Нет активных токенов CRM."
+            return "❌ Нет активных токенов."
 
         headers = {
             "Accept": "application/json",
