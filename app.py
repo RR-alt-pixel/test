@@ -85,26 +85,39 @@ def login_crm(username, password, p):
         page.type(LOGIN_SELECTOR, username, delay=50) 
         time.sleep(1.0) 
         page.type(PASSWORD_SELECTOR, password, delay=50)
-        time.sleep(1.0) # Сокращено
+        time.sleep(1.0) 
 
         # Отправка формы
         page.click(SIGN_IN_BUTTON_SELECTOR)
-        time.sleep(4) # Сокращено
+        time.sleep(4) 
 
         # Принудительный переход
         page.goto(DASHBOARD_URL, wait_until='domcontentloaded', timeout=10000)
-        time.sleep(1) # Сокращено
+        time.sleep(1) 
 
         if "dashboard" in page.url:
             print(f"[LOGIN PLW] {username} ✅ Вход успешен. URL: {page.url}")
             
+            # --- СБОР ИНФОРМАЦИИ ---
             cookies = page.context.cookies()
-            # ... (Остальной код извлечения токенов)
+            cookies_for_requests = '; '.join([f"{c['name']}={c['value']}" for c in cookies])
+            user_agent = page.evaluate('navigator.userAgent')
+
+            csrf_token_sec = next((c['value'] for c in cookies if c['name'] == '__Secure-csrf_token'), None)
+
+            csrf_value = None
+            if csrf_token_sec:
+                csrf_value = csrf_token_sec.split('.')[0]
+            # --- КОНЕЦ СБОРА ---
             
-            # (Остальной код извлечения токенов, который вы уже добавили)
-            # ...
-            
-            return { /* ... token data ... */ }
+            # ИСПРАВЛЕННЫЙ СИНТАКСИС: используем собранные переменные
+            return { 
+                "username": username, 
+                "csrf": csrf_value, 
+                "time": int(time.time()),
+                "user_agent": user_agent, 
+                "cookie_header": cookies_for_requests 
+            }
         
         print(f"[LOGIN PLW FAIL] {username}: Не удалось войти. URL: {page.url}")
         return None
@@ -115,6 +128,7 @@ def login_crm(username, password, p):
     finally:
         if browser:
             browser.close()
+
             
 def init_token_pool():
     """Инициализирует глобальный пул токенов, авторизуясь через Playwright."""
