@@ -42,35 +42,35 @@ token_cycle = None
 
 def login_crm(username, password, p):
     """
-    Выполняет вход через Playwright, используя явный путь к исполняемому файлу
-    Chromium Headless Shell для обхода проблем Gunicorn/Render.
+    Выполняет вход через Playwright, используя путь, привязанный к рабочему 
+    каталогу Render (os.getcwd()), чтобы обойти проблемы видимости кеша Gunicorn.
     """
     browser = None
     
-    # --- КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ PLAYWRIGHT ДЛЯ RENDER ---
+    # --- КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ PLAYWRIGHT ДЛЯ RENDER (ФИНАЛЬНЫЙ) ---
     # Playwright 1.55 использует билд v1187. Используем этот номер.
     PLAYWRIGHT_BUILD_VERSION = '1187' 
     
-    # Явно указываем путь к исполняемому файлу Headless Shell, который
-    # был в первых ошибках 'Executable doesn't exist'.
+    # 1. Определяем БАЗОВЫЙ ПУТЬ Playwright, используя os.getcwd() (корень проекта)
+    # Этот путь должен стать доступным после установки переменной среды PLAYWRIGHT_BROWSERS_PATH
+    PLAYWRIGHT_BASE_DIR = os.path.join(os.getcwd(), '.playwright') 
+
+    # 2. Собираем полный путь к исполняемому файлу Headless Shell
     CHROMIUM_EXECUTABLE_PATH = os.path.join(
-        os.path.expanduser('~'), 
-        '.cache', 
-        'ms-playwright', 
+        PLAYWRIGHT_BASE_DIR, 
         f'chromium_headless_shell-{PLAYWRIGHT_BUILD_VERSION}', 
         'chrome-linux', 
-        'headless_shell' # <--- ИСПРАВЛЕННЫЙ ПУТЬ
+        'headless_shell' 
     )
     # --------------------------------------------------------
     
     try:
         print(f"[PLW] Попытка запуска браузера. Путь: {CHROMIUM_EXECUTABLE_PATH}")
         
-        # 🔴 ВНЕСЕННЫЕ ИЗМЕНЕНИЯ: executable_path и args
+        # 🔴 ЗАПУСК: Явно указываем путь и аргументы
         browser = p.chromium.launch(
             headless=True,
             executable_path=CHROMIUM_EXECUTABLE_PATH,
-            # Обязательно для работы в Linux-контейнерах (Render)
             args=['--no-sandbox', '--disable-setuid-sandbox']
         )
         
