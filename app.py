@@ -143,7 +143,7 @@ def get_next_token() -> Optional[Dict]:
             return None
     try:
         token = next(token_cycle)
-        print(f"[POOL] 🔁 Переключение на аккаунт: {token['username']}")
+        print(f"[SWITCH] 🔁 Переключение на аккаунт: {token['username']}")
         return token
     except Exception:
         return None
@@ -155,7 +155,7 @@ def crm_get(endpoint: str, params: dict = None):
     for attempt in range(2):
         token = get_next_token()
         if not token:
-            return "❌ Нет активных токенов."
+            return "❌ Нет активных токенов CRM."
 
         headers = {
             "Accept": "application/json",
