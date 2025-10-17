@@ -49,61 +49,67 @@ token_cycle = None
 
 # ================== ОПТИМИЗИРОВАННАЯ ФУНКЦИЯ LOGIN_CRM ==================
 
-def login_crm(username, password, p) -> Optional[Dict]:
+def login_crm(username, password, p):
     """
-    Выполняет вход через Playwright с максимальной оптимизацией для Render.
+    Выполняет вход через Playwright с оптимизацией для Render, 
+    используя переменные окружения для поиска браузера.
     """
     browser = None
     
     try:
-        print(f"[PLW] Попытка запуска браузера для {username}...") # <-- Это нужно увидеть!
+        print(f"[PLW] Попытка запуска браузера для {username}...")
         
-        # 1. Максимальная экономия ресурсов и CPU
+        # 1. Запуск с флагами, критичными для Render
         browser = p.chromium.launch(
             headless=True,
             args=[
                 '--no-sandbox', 
                 '--disable-setuid-sandbox',
-                '--disable-gpu',
-                '--disable-dev-shm-usage',  # КРИТИЧЕСКИ ВАЖНО для контейнеров
-                '--single-process',         # Экономия памяти
-                '--no-zygote'               # Дополнительная стабильность
+                '--disable-gpu',           
+                '--disable-dev-shm-usage', # КРИТИЧЕСКИ ВАЖНО для Render
+                '--single-process',        
+                '--no-zygote'
             ],
-            timeout=30000 # Макс. 30 секунд на запуск браузера
+            timeout=30000 # Макс. 30 секунд на запуск
         )
         
-        # 2. Агрессивные таймауты
+        # 2. Уменьшенный общий таймаут
         page = browser.new_page()
-        page.set_default_timeout(20000) # Уменьшаем общий таймаут до 20 секунд
+        page.set_default_timeout(25000) # Общий таймаут 25 сек.
 
         print(f"[PLW] Переход на страницу входа: {LOGIN_URL_PLW}")
-        # Сокращен wait_until и таймаут
+        # Таймаут на загрузку страницы
         page.goto(LOGIN_URL_PLW, wait_until='load', timeout=15000) 
         
-        # Ввод данных
+        # ... (Код ввода данных)
         page.type(LOGIN_SELECTOR, username, delay=50) 
         time.sleep(1.0) 
         page.type(PASSWORD_SELECTOR, password, delay=50)
-        time.sleep(1.0) 
+        time.sleep(1.0) # Сокращено
 
         # Отправка формы
         page.click(SIGN_IN_BUTTON_SELECTOR)
-        time.sleep(3) # Сокращено
-        
+        time.sleep(4) # Сокращено
+
         # Принудительный переход
         page.goto(DASHBOARD_URL, wait_until='domcontentloaded', timeout=10000)
-        time.sleep(1) 
+        time.sleep(1) # Сокращено
 
         if "dashboard" in page.url:
-            print(f"[LOGIN PLW] {username} ✅ Вход успешен.")
-            # ... (Код извлечения токена)
-            return {...}
+            print(f"[LOGIN PLW] {username} ✅ Вход успешен. URL: {page.url}")
+            
+            cookies = page.context.cookies()
+            # ... (Остальной код извлечения токенов)
+            
+            # (Остальной код извлечения токенов, который вы уже добавили)
+            # ...
+            
+            return { /* ... token data ... */ }
         
         print(f"[LOGIN PLW FAIL] {username}: Не удалось войти. URL: {page.url}")
         return None
 
     except Exception as e:
-        # Здесь вы увидите, почему он падает, если вообще запустится
         print(f"[LOGIN PLW ERR] {username}: {type(e).__name__}: {e}")
         return None
     finally:
