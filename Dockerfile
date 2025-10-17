@@ -1,27 +1,27 @@
-# Используем официальный минимальный Python
+# === ОФИЦИАЛЬНЫЙ ОБРАЗ PYTHON ===
 FROM python:3.11-slim
 
-# Устанавливаем системные пакеты для Playwright (браузеры Chromium)
+# === СИСТЕМНЫЕ ПАКЕТЫ ДЛЯ PLAYWRIGHT (браузеры Chromium) ===
 COPY apt-packages.txt .
 RUN apt-get update && xargs apt-get install -y < apt-packages.txt && apt-get clean
 
-# Создаем рабочую директорию
+# === РАБОЧАЯ ДИРЕКТОРИЯ ===
 WORKDIR /app
 
-# Копируем все файлы проекта
+# === КОПИРУЕМ ПРОЕКТ ===
 COPY . .
 
-# Устанавливаем зависимости Python
+# === УСТАНАВЛИВАЕМ PYTHON-ЗАВИСИМОСТИ ===
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Устанавливаем браузеры Playwright
+# === УСТАНАВЛИВАЕМ БРАУЗЕРЫ PLAYWRIGHT ===
 RUN python -m playwright install --with-deps
 
-# Разрешаем запуск скрипта
+# === ДЕЛАЕМ start.sh ИСПОЛНЯЕМЫМ ===
 RUN chmod +x start.sh
 
-# Открываем порт 8000 (Render использует этот порт)
+# === ОТКРЫВАЕМ ПОРТ ===
 EXPOSE 8000
 
-# Стартуем сервер
+# === КОМАНДА ЗАПУСКА ===
 CMD ["./start.sh"]
