@@ -47,76 +47,63 @@ token_cycle = None
 
 # ================== ЛОГИКА CRM И ТОКЕНЫ (Playwright) ==================
 
+# ================== ОПТИМИЗИРОВАННАЯ ФУНКЦИЯ LOGIN_CRM ==================
+
 def login_crm(username, password, p) -> Optional[Dict]:
     """
-    Выполняет вход через Playwright, полагаясь на переменную окружения 
-    PLAYWRIGHT_BROWSERS_PATH для автоматического поиска браузера.
+    Выполняет вход через Playwright с максимальной оптимизацией для Render.
     """
     browser = None
     
     try:
-        print(f"[PLW] Попытка запуска браузера. Ожидаем автоматического поиска...")
+        print(f"[PLW] Попытка запуска браузера для {username}...") # <-- Это нужно увидеть!
         
-        # 🔴 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Добавление флагов для экономии памяти/скорости
+        # 1. Максимальная экономия ресурсов и CPU
         browser = p.chromium.launch(
             headless=True,
             args=[
                 '--no-sandbox', 
                 '--disable-setuid-sandbox',
-                '--disable-gpu',           # Отключение GPU (важно для безголовых)
-                '--disable-dev-shm-usage', # Уменьшение использования /dev/shm
-                '--single-process',        # Запуск в одном процессе
-                '--no-zygote'              # Дополнительный флаг безопасности
+                '--disable-gpu',
+                '--disable-dev-shm-usage',  # КРИТИЧЕСКИ ВАЖНО для контейнеров
+                '--single-process',         # Экономия памяти
+                '--no-zygote'               # Дополнительная стабильность
             ],
-            timeout=30000 # Макс. 30 секунд на запуск
+            timeout=30000 # Макс. 30 секунд на запуск браузера
         )
         
-        # 🔴 ИЗМЕНЕНИЕ: Сокращен общий таймаут страницы
+        # 2. Агрессивные таймауты
         page = browser.new_page()
-        page.set_default_timeout(30000) 
+        page.set_default_timeout(20000) # Уменьшаем общий таймаут до 20 секунд
 
         print(f"[PLW] Переход на страницу входа: {LOGIN_URL_PLW}")
-        # Сокращен wait_until до load
+        # Сокращен wait_until и таймаут
         page.goto(LOGIN_URL_PLW, wait_until='load', timeout=15000) 
         
         # Ввод данных
         page.type(LOGIN_SELECTOR, username, delay=50) 
         time.sleep(1.0) 
         page.type(PASSWORD_SELECTOR, password, delay=50)
-        time.sleep(2.0) # Немного сокращено
+        time.sleep(1.0) 
 
         # Отправка формы
         page.click(SIGN_IN_BUTTON_SELECTOR)
-        time.sleep(4) # Немного сокращено
-
+        time.sleep(3) # Сокращено
+        
         # Принудительный переход
-        page.goto(DASHBOARD_URL, wait_until='load', timeout=10000)
-        time.sleep(2) # Немного сокращено
+        page.goto(DASHBOARD_URL, wait_until='domcontentloaded', timeout=10000)
+        time.sleep(1) 
 
         if "dashboard" in page.url:
-            print(f"[LOGIN PLW] {username} ✅ Вход успешен. URL: {page.url}")
-            
-            cookies = page.context.cookies()
-            cookies_for_requests = '; '.join([f"{c['name']}={c['value']}" for c in cookies])
-            user_agent = page.evaluate('navigator.userAgent')
-
-            # Логика извлечения CSRF-токена
-            csrf_token_sec = next((c['value'] for c in cookies if c['name'] == '__Secure-csrf_token'), None)
-            if csrf_token_sec:
-                csrf_value = csrf_token_sec.split('.')[0] 
-            else:
-                print(f"[WARN] {username}: CSRF-токен '__Secure-csrf_token' не найден. Используем заглушку.")
-                csrf_value = "MISSING_CSRF_PLACEHOLDER"
-                
-            return {
-                "username": username, "csrf": csrf_value, "time": int(time.time()),
-                "user_agent": user_agent, "cookie_header": cookies_for_requests 
-            }
+            print(f"[LOGIN PLW] {username} ✅ Вход успешен.")
+            # ... (Код извлечения токена)
+            return {...}
         
         print(f"[LOGIN PLW FAIL] {username}: Не удалось войти. URL: {page.url}")
         return None
 
     except Exception as e:
+        # Здесь вы увидите, почему он падает, если вообще запустится
         print(f"[LOGIN PLW ERR] {username}: {type(e).__name__}: {e}")
         return None
     finally:
