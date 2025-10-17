@@ -1,4 +1,11 @@
+# Базовые пакеты для Playwright
 libnss3
 libx11-xcb1
 libasound2
 libgbm-dev
+
+# Дополнительные пакеты, необходимые для полноценной работы (рекомендуемые Playwright)
+libgtk-3-0
+libnotify-dev
+libgconf-2-4
+libdbus-glib-1-2
