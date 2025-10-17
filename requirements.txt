@@ -1,5 +1,5 @@
-Flask
+Flask==2.2.5
 gunicorn
 requests
-Flask-CORS
 playwright
+flask-cors
