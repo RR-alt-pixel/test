@@ -45,6 +45,8 @@ token_cycle = None
 
 # ================== 5. ЛОГИКА CRM И ТОКЕНЫ (Playwright) ==================
 
+# ================== ЛОГИКА CRM И ТОКЕНЫ (Playwright) ==================
+
 def login_crm(username, password, p) -> Optional[Dict]:
     """
     Выполняет вход через Playwright, полагаясь на переменную окружения 
@@ -55,30 +57,41 @@ def login_crm(username, password, p) -> Optional[Dict]:
     try:
         print(f"[PLW] Попытка запуска браузера. Ожидаем автоматического поиска...")
         
+        # 🔴 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Добавление флагов для экономии памяти/скорости
         browser = p.chromium.launch(
             headless=True,
-            args=['--no-sandbox', '--disable-setuid-sandbox']
+            args=[
+                '--no-sandbox', 
+                '--disable-setuid-sandbox',
+                '--disable-gpu',           # Отключение GPU (важно для безголовых)
+                '--disable-dev-shm-usage', # Уменьшение использования /dev/shm
+                '--single-process',        # Запуск в одном процессе
+                '--no-zygote'              # Дополнительный флаг безопасности
+            ],
+            timeout=30000 # Макс. 30 секунд на запуск
         )
         
+        # 🔴 ИЗМЕНЕНИЕ: Сокращен общий таймаут страницы
         page = browser.new_page()
-        page.set_default_timeout(45000)
+        page.set_default_timeout(30000) 
 
         print(f"[PLW] Переход на страницу входа: {LOGIN_URL_PLW}")
-        page.goto(LOGIN_URL_PLW, wait_until='domcontentloaded')
+        # Сокращен wait_until до load
+        page.goto(LOGIN_URL_PLW, wait_until='load', timeout=15000) 
         
         # Ввод данных
         page.type(LOGIN_SELECTOR, username, delay=50) 
         time.sleep(1.0) 
         page.type(PASSWORD_SELECTOR, password, delay=50)
-        time.sleep(2.5) 
+        time.sleep(2.0) # Немного сокращено
 
         # Отправка формы
         page.click(SIGN_IN_BUTTON_SELECTOR)
-        time.sleep(5) 
+        time.sleep(4) # Немного сокращено
 
-        # Принудительный переход для инициализации куки
-        page.goto(DASHBOARD_URL, wait_until='load', timeout=20000)
-        time.sleep(3) 
+        # Принудительный переход
+        page.goto(DASHBOARD_URL, wait_until='load', timeout=10000)
+        time.sleep(2) # Немного сокращено
 
         if "dashboard" in page.url:
             print(f"[LOGIN PLW] {username} ✅ Вход успешен. URL: {page.url}")
@@ -87,27 +100,19 @@ def login_crm(username, password, p) -> Optional[Dict]:
             cookies_for_requests = '; '.join([f"{c['name']}={c['value']}" for c in cookies])
             user_agent = page.evaluate('navigator.userAgent')
 
-            # --- КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ ЛОГИКИ ТОКЕНА ---
+            # Логика извлечения CSRF-токена
             csrf_token_sec = next((c['value'] for c in cookies if c['name'] == '__Secure-csrf_token'), None)
-
             if csrf_token_sec:
                 csrf_value = csrf_token_sec.split('.')[0] 
             else:
-                # Если CSRF-токен не найден, используем заглушку, 
-                # но возвращаем полный заголовок куки.
                 print(f"[WARN] {username}: CSRF-токен '__Secure-csrf_token' не найден. Используем заглушку.")
                 csrf_value = "MISSING_CSRF_PLACEHOLDER"
-            # ---------------------------------------------
                 
             return {
-                "username": username, 
-                "csrf": csrf_value, 
-                "time": int(time.time()),
-                "user_agent": user_agent, 
-                "cookie_header": cookies_for_requests 
+                "username": username, "csrf": csrf_value, "time": int(time.time()),
+                "user_agent": user_agent, "cookie_header": cookies_for_requests 
             }
         
-        # Если не "dashboard", то вход не успешен
         print(f"[LOGIN PLW FAIL] {username}: Не удалось войти. URL: {page.url}")
         return None
 
