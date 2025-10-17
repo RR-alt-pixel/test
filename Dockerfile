@@ -1,27 +1,42 @@
-# === ОФИЦИАЛЬНЫЙ ОБРАЗ PYTHON ===
+# ==============================
+# 📦 1. БАЗОВЫЙ ОБРАЗ
+# ==============================
 FROM python:3.11-slim
 
-# === СИСТЕМНЫЕ ПАКЕТЫ ДЛЯ PLAYWRIGHT (браузеры Chromium) ===
+# ==============================
+# ⚙️ 2. УСТАНОВКА СИСТЕМНЫХ ЗАВИСИМОСТЕЙ
+# ==============================
+# Копируем список системных пакетов
 COPY apt-packages.txt .
-RUN apt-get update && xargs apt-get install -y < apt-packages.txt && apt-get clean
 
-# === РАБОЧАЯ ДИРЕКТОРИЯ ===
-WORKDIR /app
+# Устанавливаем всё необходимое для Playwright и Chromium
+RUN apt-get update && \
+    xargs apt-get install -y --no-install-recommends -f < apt-packages.txt && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# === КОПИРУЕМ ПРОЕКТ ===
-COPY . .
-
-# === УСТАНАВЛИВАЕМ PYTHON-ЗАВИСИМОСТИ ===
+# ==============================
+# 🧱 3. УСТАНОВКА PYTHON-ПАКЕТОВ
+# ==============================
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# === УСТАНАВЛИВАЕМ БРАУЗЕРЫ PLAYWRIGHT ===
-RUN python -m playwright install --with-deps
+# ==============================
+# 🌍 4. УСТАНОВКА PLAYWRIGHT + БРАУЗЕРОВ
+# ==============================
+RUN python -m playwright install --with-deps chromium
 
-# === ДЕЛАЕМ start.sh ИСПОЛНЯЕМЫМ ===
+# ==============================
+# 📂 5. КОПИРУЕМ ПРОЕКТ В КОНТЕЙНЕР
+# ==============================
+WORKDIR /app
+COPY . .
+
+# ==============================
+# 🔑 6. ДОБАВЛЯЕМ ПРАВА НА start.sh
+# ==============================
 RUN chmod +x start.sh
 
-# === ОТКРЫВАЕМ ПОРТ ===
-EXPOSE 8000
-
-# === КОМАНДА ЗАПУСКА ===
+# ==============================
+# 🚀 7. ЗАПУСК ПРИ СТАРТЕ КОНТЕЙНЕРА
+# ==============================
 CMD ["./start.sh"]
