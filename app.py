@@ -38,6 +38,11 @@ accounts = [
     {"username": "blue7", "password": "842dfghm"},
     {"username": "blue8", "password": "89df45bg"},
     {"username": "blue9", "password": "3363f44d"},
+    {"username": "pink5", "password": "ugsdf413"},
+    {"username": "pink6", "password": "851hjk74"},
+    {"username": "pink7", "password": "85tg24vd"},
+    {"username": "pink8", "password": "14gh1223"},
+    {"username": "pink9", "password": "845ghj65"},
 ]
 
 # ================== 3. ПУЛ ТОКЕНОВ ==================
