@@ -32,6 +32,8 @@ SIGN_IN_BUTTON_SELECTOR = "button[type='submit']"
 TOKENS_FILE = "tokens.json"
 TOKENS_LOCK = Lock()
 
+MAX_PARALLEL_LOGINS = 2
+
 # ================== 2. АККАУНТЫ ==================
 accounts = [
     {"username": "blue6", "password": "33dff63d"},
@@ -188,34 +190,56 @@ def login_crm_playwright(username: str, password: str, p, show_browser: bool = F
 # ================== 5. ИНИЦИАЛИЗАЦИЯ ПУЛА (playwright-driven) ==================
 def init_token_pool_playwright(show_browser: bool = False):
     """
-    Логин по всем учёткам и заполнение token_pool.
-    Если есть tokens.json — сначала загрузим его (чтобы не делать логин каждый старт).
+    Логинит все учётки через Playwright, по MAX_PARALLEL_LOGINS за раз.
+    Делает паузы между партиями, чтобы не съедать память Render.
     """
     global token_pool, token_cycle
-    # Попытка загрузить с диска
+
+    # 1️⃣ Загружаем сохранённые токены, если есть
     load_tokens_from_file()
     if token_pool:
-        # Если уже есть — убедимся, что все указанные учётки присутствуют, иначе дополним
         existing_usernames = {t["username"] for t in token_pool}
         need_login = [a for a in accounts if a["username"] not in existing_usernames]
         if not need_login:
             token_cycle = itertools.cycle(token_pool)
             print(f"[POOL] 🟢 Используем токены из {TOKENS_FILE}.")
             return
+    else:
+        need_login = accounts
 
-    print("[POOL] 🔄 Инициализация пула токенов через Playwright...")
+    print(f"[POOL] 🔄 Инициализация пула токенов ({len(need_login)} учёток, по {MAX_PARALLEL_LOGINS} за раз)...")
     token_pool = []
+
     try:
         with sync_playwright() as p:
-            for acc in accounts:
-                tok = login_crm_playwright(acc["username"], acc["password"], p, show_browser=show_browser)
-                if tok:
-                    token_pool.append(tok)
-                    print(f"[POOL] ✅ {acc['username']} добавлен.")
-                else:
-                    print(f"[POOL] ⚠️ {acc['username']} не дал токены.")
+            # Разбиваем на партии по MAX_PARALLEL_LOGINS
+            for i in range(0, len(need_login), MAX_PARALLEL_LOGINS):
+                batch = need_login[i:i + MAX_PARALLEL_LOGINS]
+                threads = []
+                results = []
+
+                def login_and_store(acc):
+                    tok = login_crm_playwright(acc["username"], acc["password"], p, show_browser=show_browser)
+                    if tok:
+                        results.append(tok)
+
+                # 🔹 Запускаем нужное количество потоков
+                for acc in batch:
+                    t = Thread(target=login_and_store, args=(acc,))
+                    t.start()
+                    threads.append(t)
+
+                # 🔹 Ждём пока все закончат
+                for t in threads:
+                    t.join()
+
+                # 🔹 Добавляем результаты и делаем паузу
+                token_pool.extend(results)
+                print(f"[POOL] ✅ Партия логинов завершена ({i + len(batch)}/{len(need_login)}).")
+                time.sleep(4)  # пауза между партиями (4 сек для Render)
+
     except Exception as e:
-        print(f"[POOL ERROR] during init: {e}")
+        print(f"[POOL ERROR] Ошибка при инициализации пула: {e}")
         traceback.print_exc()
 
     if token_pool:
@@ -225,6 +249,7 @@ def init_token_pool_playwright(show_browser: bool = False):
     else:
         token_cycle = None
         print("[POOL] ❌ Пул токенов пуст! Проверь логин-флоу.")
+
 
 # ================== 6. ПОЛУЧЕНИЕ СЛЕДУЮЩЕГО ТОКЕНА (ROUND-ROBIN) ==================
 def get_next_token() -> Optional[Dict]:
