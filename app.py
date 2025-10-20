@@ -17,22 +17,25 @@ from playwright.sync_api import sync_playwright, Browser, Page
 # ================== 1. НАСТРОЙКИ И АВТОРИЗАЦИЯ ==================
 BOT_TOKEN = "8240195944:AAEQFd2met5meCU1uwu5PvPejJoiKu94cms"
 
+# URL с allowed ids (github raw)
 ALLOWED_USERS_URL = "https://raw.githubusercontent.com/RR-alt-pixel/test/refs/heads/main/allowed_ids.json"
 ALLOWED_USER_IDS: List[int] = [0]
 
+# CRM URLS
 BASE_URL = "https://crm431241.ru"
 LOGIN_PAGE = f"{BASE_URL}/auth/login"
-API_BASE = "https://crm431241.ru"
+# Эндпоинты, которые мы вызываем через requests после получения токенов
+API_BASE = "https://crm431241.ru"  # used for constructing API endpoints in crm_get
 
 SECRET_TOKEN = "Refresh-Server-Key-2025-Oct-VK44"
 
+# Селекторы логина на странице (если другие — замените)
 LOGIN_SELECTOR = "#username"
 PASSWORD_SELECTOR = "#password"
 SIGN_IN_BUTTON_SELECTOR = "button[type='submit']"
 
-# ================== 2. АККАУНТЫ ==================
+# ================== 2. АККАУНТЫ (Playwright-driven login) ==================
 accounts = [
-    {"username": "pink5", "password": "ugsdf413"},
     {"username": "pink6", "password": "851hjk74"},
     {"username": "pink7", "password": "85tg24vd"},
     {"username": "pink8", "password": "14gh1223"},
@@ -40,21 +43,38 @@ accounts = [
 ]
 
 # ================== 3. ПУЛ ТОКЕНОВ ==================
+# token_pool: list of dicts:
+# {
+#   "username": ...,
+#   "access": "...",   # extracted access token value (from cookie or other)
+#   "csrf": "...",     # extracted csrf token value
+#   "time": 1234567890,
+#   "cookie_header": "name=val; name2=val2",
+#   "user_agent": "..."
+# }
 token_pool: List[Dict] = []
 token_cycle = None
-current_token = None  # 🔸 активный токен, используется в crm_get()
 
-# ================== 4. PLAYWRIGHT LOGIN ==================
+# ================== 4. PLAYWRIGHT LOGIN (extract cookies) ==================
+
 def login_crm_playwright(username: str, password: str, p) -> Optional[Dict]:
+    """
+    Login via Playwright, return token dict or None.
+    Uses the provided Playwright object `p` from sync_playwright().
+    Extracts cookies and tries to find __Secure-access_token and __Secure-csrf_token.
+    """
     browser: Optional[Browser] = None
     try:
         print(f"[PLW] starting browser for {username}...")
         browser = p.chromium.launch(
             headless=True,
             args=[
-                "--no-sandbox", "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage", "--single-process",
-                "--no-zygote", "--disable-gpu",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--single-process",
+                "--no-zygote",
+                "--disable-gpu",
                 "--disable-features=site-per-process,Translate,BlinkGenPropertyTrees"
             ],
             timeout=30000
@@ -65,32 +85,53 @@ def login_crm_playwright(username: str, password: str, p) -> Optional[Dict]:
 
         print(f"[PLW] goto login page for {username}: {LOGIN_PAGE}")
         page.goto(LOGIN_PAGE, wait_until="load", timeout=30000)
+
+        # Fill and submit
         page.fill(LOGIN_SELECTOR, username)
         time.sleep(0.5)
         page.fill(PASSWORD_SELECTOR, password)
         time.sleep(0.5)
         page.click(SIGN_IN_BUTTON_SELECTOR)
 
+        # wait for navigation or dashboard indicator
         try:
             page.wait_for_url("**/dashboard**", timeout=10000)
         except Exception:
+            # sometimes the site stays without full redirect; give it a short wait
             time.sleep(2)
 
+        # collect cookies
         cookies = context.cookies()
         cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
         user_agent = page.evaluate("() => navigator.userAgent")
 
-        access_cookie = next((c["value"] for c in cookies if "access" in c["name"]), None)
-        csrf_cookie = next((c["value"] for c in cookies if "csrf" in c["name"].lower()), None)
+        # Try to find tokens in cookies first
+        access_cookie = next((c["value"] for c in cookies if "__Secure-access_token" in c["name"] or "access_token" in c["name"]), None)
+        csrf_cookie = next((c["value"] for c in cookies if "__Secure-csrf_token" in c["name"] or "csrf" in c["name"].lower()), None)
 
+        # If not found in cookies, try localStorage (some sites put tokens there)
         if not access_cookie or not csrf_cookie:
             try:
                 ls = page.evaluate("() => Object.assign({}, window.localStorage)")
+                # search likely keys
                 for k, v in ls.items():
                     kl = k.lower()
                     if ("access" in kl and "token" in kl) and not access_cookie:
                         access_cookie = v
-                    if ("csrf" in kl) and not csrf_cookie:
+                    if ("csrf" in kl or "csrf_token" in kl) and not csrf_cookie:
+                        csrf_cookie = v
+            except Exception:
+                pass
+
+        # If still not found, try sessionStorage
+        if not access_cookie or not csrf_cookie:
+            try:
+                ss = page.evaluate("() => Object.assign({}, window.sessionStorage)")
+                for k, v in ss.items():
+                    kl = k.lower()
+                    if ("access" in kl and "token" in kl) and not access_cookie:
+                        access_cookie = v
+                    if ("csrf" in kl or "csrf_token" in kl) and not csrf_cookie:
                         csrf_cookie = v
             except Exception:
                 pass
@@ -121,8 +162,12 @@ def login_crm_playwright(username: str, password: str, p) -> Optional[Dict]:
         except Exception:
             pass
 
-# ================== 5. ИНИЦИАЛИЗАЦИЯ ПУЛА ==================
+# ================== 5. ИНИЦИАЛИЗАЦИЯ ПУЛА (playwright-driven) ==================
+
 def init_token_pool_playwright():
+    """
+    Launch Playwright once and login each account, build token_pool and cycle.
+    """
     global token_pool, token_cycle
     token_pool = []
     print("[POOL] init_token_pool_playwright: starting login for accounts...")
@@ -143,30 +188,34 @@ def init_token_pool_playwright():
         print(f"[POOL] loaded {len(token_pool)} tokens.")
     else:
         token_cycle = None
-        print("[POOL] no tokens loaded!")
+        print("[POOL] no tokens loaded! check login flow.")
 
-# ================== 6. РОТАЦИЯ АККАУНТОВ КАЖДЫЙ ЧАС ==================
-def rotate_accounts_hourly():
-    global current_token
-    while True:
-        if not token_pool:
-            print("[ROTATE] ⚠️ Token pool empty, waiting 60s...")
-            time.sleep(60)
-            continue
-        current_token = next(token_cycle)
-        print(f"[ROTATE] 🔁 Active account switched to: {current_token['username']}")
-        time.sleep(3600)  # 🔸 менять аккаунт каждый час
+# ================== 6. ПОЛУЧЕНИЕ СЛЕДУЮЩЕГО ТОКЕНА ==================
 
-# ================== 7. CRM GET ==================
-def crm_get(endpoint: str, params: dict = None):
-    global current_token, token_pool, token_cycle
+def get_next_token() -> Optional[Dict]:
+    global token_cycle, token_pool
+    if not token_cycle:
+        print("[AUTH] token_cycle empty, initializing pool...")
+        init_token_pool_playwright()
+        if not token_cycle:
+            return None
+    try:
+        return next(token_cycle)
+    except Exception:
+        return None
 
-    if not current_token:
-        print("[AUTH] No active token yet, picking initial one...")
-        current_token = next(token_cycle)
+# ================== 7. CRM GET (использует токен из пула, обновляет при 401/403) ==================
 
+def crm_get(endpoint: str, params: dict = None, retry_on_refresh: bool = True):
+    """
+    Performs GET request to CRM using a token from token_pool.
+    On 401/403 tries to refresh token for affected account (via Playwright).
+    """
+    global token_pool, token_cycle
+
+    # Two attempts: initial token and after refresh
     for attempt in range(2):
-        token = current_token
+        token = get_next_token()
         if not token:
             return "❌ Нет активных токенов CRM."
 
@@ -174,7 +223,7 @@ def crm_get(endpoint: str, params: dict = None):
             "Accept": "application/json",
             "Content-Type": "application/json",
             "User-Agent": token.get("user_agent", "python-requests"),
-            "Cookie": token.get("cookie_header", "")
+            "Cookie": token.get("cookie_header", ""),
         }
         if token.get("csrf"):
             headers["X-CSRF-Token"] = token["csrf"]
@@ -187,32 +236,41 @@ def crm_get(endpoint: str, params: dict = None):
             return f"❌ Ошибка соединения: {e}"
 
         if r.status_code in (401, 403):
+            # refresh this username's token via Playwright
             uname = token.get("username")
-            print(f"[AUTH] {uname} token invalid ({r.status_code}), refreshing...")
+            print(f"[AUTH] {uname} token invalid (status {r.status_code}), refreshing via Playwright...")
             try:
                 with sync_playwright() as p:
-                    new_t = login_crm_playwright(
-                        uname,
-                        next(a["password"] for a in accounts if a["username"] == uname),
-                        p
-                    )
+                    new_t = login_crm_playwright(uname, next(a["password"] for a in accounts if a["username"] == uname), p)
                 if new_t:
+                    # replace token in pool
+                    replaced = False
                     for i, t in enumerate(token_pool):
                         if t.get("username") == uname:
                             token_pool[i] = new_t
+                            replaced = True
                             print(f"[AUTH] {uname} token refreshed.")
                             break
+                    if not replaced:
+                        token_pool.append(new_t)
                     token_cycle = itertools.cycle(token_pool)
-                    current_token = new_t
+                    # try again (outer loop will repeat)
+                    continue
+                else:
+                    print(f"[AUTH FAIL] Could not refresh token for {uname}")
+                    # continue to next token in pool (outer loop will do that)
                     continue
             except Exception as e:
                 print(f"[AUTH REFRESH ERROR] {e}")
                 traceback.print_exc()
                 continue
-        return r
-    return "❌ Не удалось получить данные после обновления токенов."
 
-# ================== 8. DYNAMIC ALLOWED IDS ==================
+        # success or non-auth error
+        return r
+
+    return "❌ Не удалось получить данные после попытки обновления токенов."
+
+# ================== 8. DYNAMIC ALLOWED IDS (github) ==================
 LAST_FETCH_TIME = 0
 FETCH_INTERVAL = 3600
 
@@ -228,23 +286,33 @@ def fetch_allowed_users():
             if new_ids:
                 ALLOWED_USER_IDS = new_ids
                 LAST_FETCH_TIME = int(time.time())
-                print(f"[AUTH-LOG] loaded allowed ids: {len(ALLOWED_USER_IDS)} users")
+                print(f"[AUTH-LOG] loaded allowed ids: {ALLOWED_USER_IDS}")
+            else:
+                print("[AUTH-LOG] allowed list empty in remote, skipping")
+        else:
+            print(f"[AUTH-LOG] failed to fetch allowed ids: {r.status_code}")
     except Exception as e:
         print(f"[AUTH-LOG] error fetching allowed ids: {e}")
 
 def periodic_fetch():
     while True:
-        if int(time.time()) - LAST_FETCH_TIME >= FETCH_INTERVAL:
-            fetch_allowed_users()
+        try:
+            if int(time.time()) - LAST_FETCH_TIME >= FETCH_INTERVAL:
+                fetch_allowed_users()
+        except Exception:
+            pass
         time.sleep(FETCH_INTERVAL)
 
 # ================== 9. SEARCH HELPERS ==================
-# 🔹 (твой оригинальный блок — без изменений)
+
 def search_by_iin(iin: str):
     r = crm_get("/api/v2/person-search/by-iin", params={"iin": iin})
-    if isinstance(r, str): return r
-    if r.status_code == 404: return "⚠️ Ничего не найдено по ИИН."
-    if r.status_code != 200: return f"❌ Ошибка {r.status_code}: {r.text}"
+    if isinstance(r, str):
+        return r
+    if r.status_code == 404:
+        return "⚠️ Ничего не найдено по ИИН."
+    if r.status_code != 200:
+        return f"❌ Ошибка {r.status_code}: {r.text}"
     p = r.json()
     return (
         f"👤 <b>{p.get('snf','')}</b>\n"
@@ -260,11 +328,15 @@ def search_by_phone(phone: str):
     if clean.startswith("8"):
         clean = "7" + clean[1:]
     r = crm_get("/api/v2/person-search/by-phone", params={"phone": clean})
-    if isinstance(r, str): return r
-    if r.status_code == 404: return f"⚠️ Ничего не найдено по номеру {phone}"
-    if r.status_code != 200: return f"❌ Ошибка {r.status_code}: {r.text}"
+    if isinstance(r, str):
+        return r
+    if r.status_code == 404:
+        return f"⚠️ Ничего не найдено по номеру {phone}"
+    if r.status_code != 200:
+        return f"❌ Ошибка {r.status_code}: {r.text}"
     data = r.json()
-    if not data: return f"⚠️ Ничего не найдено по номеру {phone}"
+    if not data:
+        return f"⚠️ Ничего не найдено по номеру {phone}"
     p = data[0] if isinstance(data, list) else data
     return (
         f"👤 <b>{p.get('snf','')}</b>\n"
@@ -284,18 +356,26 @@ def search_by_fio(text: str):
     else:
         parts = text.split(" ")
         params = {}
-        if len(parts) >= 1 and parts[0] != "": params["surname"] = parts[0]
-        if len(parts) >= 2 and parts[1] != "": params["name"] = parts[1]
-        if len(parts) >= 3 and parts[2] != "": params["father_name"] = parts[2]
+        if len(parts) >= 1 and parts[0] != "":
+            params["surname"] = parts[0]
+        if len(parts) >= 2 and parts[1] != "":
+            params["name"] = parts[1]
+        if len(parts) >= 3 and parts[2] != "":
+            params["father_name"] = parts[2]
         q = {**params, "smart_mode": "false", "limit": 10}
 
     r = crm_get("/api/v2/person-search/smart", params=q)
-    if isinstance(r, str): return r
-    if r.status_code == 404: return "⚠️ Ничего не найдено."
-    if r.status_code != 200: return f"❌ Ошибка {r.status_code}: {r.text}"
+    if isinstance(r, str):
+        return r
+    if r.status_code == 404:
+        return "⚠️ Ничего не найдено."
+    if r.status_code != 200:
+        return f"❌ Ошибка {r.status_code}: {r.text}"
     data = r.json()
-    if not data: return "⚠️ Ничего не найдено."
-    if isinstance(data, dict): data = [data]
+    if not data:
+        return "⚠️ Ничего не найдено."
+    if isinstance(data, dict):
+        data = [data]
     results = []
     for i, p in enumerate(data[:10], start=1):
         results.append(
@@ -317,6 +397,7 @@ def api_search():
     user_id = data.get('telegram_user_id')
     if user_id is None:
         return jsonify({"error": "Ошибка авторизации: ID пользователя не найден."}), 403
+
     try:
         if int(user_id) not in ALLOWED_USER_IDS:
             print(f"❌ Доступ запрещен для ID: {user_id}")
@@ -354,15 +435,20 @@ def refresh_users():
     }), 200
 
 # ================== 11. STARTUP ==================
-print("--- 🔴 DEBUG: STARTING API (Playwright-driven tokens + hourly rotation) 🔴 ---")
+print("--- 🔴 DEBUG: STARTING API (Playwright-driven tokens) 🔴 ---")
+
 print("🔐 Initial fetch allowed users...")
 fetch_allowed_users()
 
+print("🔄 Start periodic allowed-users fetcher...")
 Thread(target=periodic_fetch, daemon=True).start()
+
+print("🔐 Initializing token pool (Playwright logins)...")
+# run in background thread to not block Gunicorn worker startup
 Thread(target=init_token_pool_playwright, daemon=True).start()
-Thread(target=rotate_accounts_hourly, daemon=True).start()
 
 print("🚀 API server ready to receive requests.")
 
+# If running locally with python app.py
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5000)
