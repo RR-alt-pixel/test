@@ -273,62 +273,7 @@ def periodic_fetch():
         time.sleep(FETCH_INTERVAL)
 
 # ================== 9. SEARCH ==================
-def search_by_iin(iin: str):
-    r = enqueue_crm_get("/api/v2/person-search/by-iin", params={"iin": iin})
-    if r["status"] != "ok":
-        pos = r.get("queue_position", "?")
-        return f"⌛ Ваш запрос в очереди (позиция {pos})."
-    resp = r["result"]
-    if isinstance(resp, str):
-        return resp
-    if resp.status_code != 200:
-        return f"❌ Ошибка {resp.status_code}: {resp.text}"
-    p = resp.json()
-    return f"👤 <b>{p.get('snf','')}</b>\n🧾 ИИН: <code>{p.get('iin','')}</code>\n📱 Телефон: {p.get('phone_number','')}"
-
-def search_by_phone(phone: str):
-    clean = ''.join(filter(str.isdigit, phone))
-    if clean.startswith("8"):
-        clean = "7" + clean[1:]
-    r = enqueue_crm_get("/api/v2/person-search/by-phone", params={"phone": clean})
-    if r["status"] != "ok":
-        pos = r.get("queue_position", "?")
-        return f"⌛ Ваш запрос в очереди (позиция {pos})."
-    resp = r["result"]
-    if isinstance(resp, str):
-        return resp
-    if resp.status_code != 200:
-        return f"❌ Ошибка {resp.status_code}: {resp.text}"
-    data = resp.json()
-    if not data:
-        return f"⚠️ Ничего не найдено по номеру {phone}"
-    p = data[0] if isinstance(data, list) else data
-    return f"👤 <b>{p.get('snf','')}</b>\n🧾 ИИН: <code>{p.get('iin','')}</code>\n📱 Телефон: {p.get('phone_number','')}"
-
-def search_by_fio(text: str):
-    parts = text.strip().split()
-    params = {"smart_mode": "false", "limit": 10}
-    if len(parts) >= 1: params["surname"] = parts[0]
-    if len(parts) >= 2: params["name"] = parts[1]
-    if len(parts) >= 3: params["father_name"] = parts[2]
-    r = enqueue_crm_get("/api/v2/person-search/smart", params=params)
-    if r["status"] != "ok":
-        pos = r.get("queue_position", "?")
-        return f"⌛ Ваш запрос в очереди (позиция {pos})."
-    resp = r["result"]
-    if isinstance(resp, str):
-        return resp
-    if resp.status_code != 200:
-        return f"❌ Ошибка {resp.status_code}: {resp.text}"
-    data = resp.json()
-    if not data:
-        return "⚠️ Ничего не найдено."
-    if isinstance(data, dict):
-        data = [data]
-    results = []
-    for i, p in enumerate(data[:10], 1):
-        results.append(f"{i}. 👤 <b>{p.get('snf','')}</b>\n🧾 ИИН: <code>{p.get('iin','')}</code>")
-    return "📌 Результаты поиска:\n\n" + "\n".join(results)
++7 747 497 5303
 
 # ================== 10. FLASK ==================
 app = Flask(__name__)
