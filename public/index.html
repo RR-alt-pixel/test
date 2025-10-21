@@ -1,16 +1,19 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-    <title>CRM Search Mini App</title>
+    <title>SherLOCK CRM Mini App</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
-        /* CSS стили для оформления Mini App */
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             padding: 10px;
             background-color: var(--tg-theme-bg-color);
             color: var(--tg-theme-text-color);
             margin: 0;
+        }
+        h1 {
+            text-align: center;
+            font-weight: 600;
         }
         input[type="text"] {
             width: 100%;
@@ -33,114 +36,125 @@
             cursor: pointer;
             font-size: 16px;
         }
-        .result {
+        button:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+        .result, .error, .queue {
             white-space: pre-wrap;
             background-color: var(--tg-theme-secondary-bg-color);
             padding: 15px;
             border-radius: 5px;
             margin-top: 15px;
-            color: var(--tg-theme-text-color);
             font-size: 14px;
         }
         .error {
             color: var(--tg-theme-destructive-text-color);
-            background-color: var(--tg-theme-secondary-bg-color);
-            padding: 10px;
-            border-radius: 5px;
-            margin-top: 15px;
-            /* Выделяем красным цветом, чтобы показать ошибку */
-            border: 1px solid var(--tg-theme-destructive-text-color); 
+            border: 1px solid var(--tg-theme-destructive-text-color);
+        }
+        .queue {
+            color: var(--tg-theme-hint-color);
+            text-align: center;
+            font-style: italic;
         }
     </style>
 </head>
 <body>
     <div id="app">
-        <h1>Sherlock</h1>
-        <p>Введите тут...</p>
-        <input type="text" id="queryInput" placeholder="Введите данные">
+        <h1>SherLOCK</h1>
+        <p>Введите данные для поиска:</p>
+        <input type="text" id="queryInput" placeholder="ИИН, ФИО или номер телефона">
         <button id="searchButton">ИСКАТЬ</button>
+        <div id="queueStatus" class="queue"></div>
         <div id="resultOutput" class="result">Здесь появится результат.</div>
     </div>
 
     <script>
-        // 🛑 УБЕДИТЕСЬ, ЧТО ЭТО ТОЧНЫЙ АДРЕС ВАШЕГО BACKEND (API) НА RENDER.COM
-        const API_BASE_URL = "https://test-2-tkqp.onrender.com"; 
-        
+        const API_BASE_URL = "https://test-2-tkqp.onrender.com";  // ✅ Твой API на Render
+
         const queryInput = document.getElementById('queryInput');
         const searchButton = document.getElementById('searchButton');
         const resultOutput = document.getElementById('resultOutput');
+        const queueStatus = document.getElementById('queueStatus');
 
-        // Инициализация Mini App
+        let pollingInterval = null;
+
         if (window.Telegram && window.Telegram.WebApp) {
             Telegram.WebApp.ready();
             Telegram.WebApp.expand();
         }
 
-        searchButton.addEventListener('click', async () => {
+        async function checkQueueSize() {
+            try {
+                const res = await fetch(`${API_BASE_URL}/api/queue-size`);
+                const data = await res.json();
+                if (data.queue_size !== undefined) {
+                    queueStatus.innerText = `⏳ В очереди сейчас: ${data.queue_size}`;
+                }
+            } catch (err) {
+                console.warn('Ошибка при обновлении очереди', err);
+            }
+        }
+
+        async function sendSearch() {
             const query = queryInput.value.trim();
             if (!query) {
                 resultOutput.className = 'error';
-                resultOutput.innerHTML = 'Введите запрос.';
+                resultOutput.innerText = 'Введите запрос.';
                 return;
             }
 
-            // 🟢 БЛОК ИЗВЛЕЧЕНИЯ ID ПОЛЬЗОВАТЕЛЯ ИЗ ДАННЫХ TELEGRAM
             let userId = null;
-            if (window.Telegram && window.Telegram.WebApp && Telegram.WebApp.initDataUnsafe && Telegram.WebApp.initDataUnsafe.user) {
-                // Извлекаем ID текущего пользователя, который открыл Mini App
+            if (window.Telegram?.WebApp?.initDataUnsafe?.user) {
                 userId = Telegram.WebApp.initDataUnsafe.user.id;
-            } 
-            
-            if (userId === null) {
-                // Если ID не получен (что маловероятно в реальном Telegram), блокируем
+            }
+
+            if (!userId) {
                 resultOutput.className = 'error';
-                resultOutput.innerHTML = 'Ошибка авторизации: Не удалось получить ваш ID Telegram.';
+                resultOutput.innerText = 'Ошибка авторизации: не удалось получить ваш ID Telegram.';
                 return;
             }
 
-            resultOutput.className = 'result';
-            resultOutput.innerHTML = 'Поиск...';
             searchButton.disabled = true;
+            resultOutput.className = 'result';
+            resultOutput.innerText = '⌛ Отправка запроса...';
+            queueStatus.innerText = '';
+
+            // Запускаем фоновое обновление очереди
+            if (pollingInterval) clearInterval(pollingInterval);
+            pollingInterval = setInterval(checkQueueSize, 2500);
 
             try {
                 const response = await fetch(`${API_BASE_URL}/api/search`, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         query: query,
-                        // 🟢 ОТПРАВЛЯЕМ ID ПОЛЬЗОВАТЕЛЯ В API ДЛЯ ПРОВЕРКИ ДОСТУПА
-                        telegram_user_id: userId 
+                        telegram_user_id: userId
                     })
                 });
 
                 const data = await response.json();
+                clearInterval(pollingInterval);
+                queueStatus.innerText = '';
 
                 if (response.ok) {
-                    // Успешный ответ
                     resultOutput.className = 'result';
-                    // Используем innerHTML, чтобы отобразить HTML-теги <b>
-                    resultOutput.innerHTML = data.result; 
-                } else if (response.status === 403) {
-                    // 🛑 ОБРАБОТКА ОШИБКИ ДОСТУПА (403 Forbidden)
-                    resultOutput.className = 'error';
-                    resultOutput.innerHTML = `❌ ДОСТУП ЗАПРЕЩЕН: ${data.error || 'У вас нет разрешения на использование этого приложения.'}`;
+                    resultOutput.innerHTML = data.result;
                 } else {
-                    // Ошибка на стороне сервера (ошибка CRM, 500 и т.д.)
                     resultOutput.className = 'error';
-                    resultOutput.innerHTML = `❌ Ошибка сервера: ${data.error || 'Неизвестная ошибка.'}`;
+                    resultOutput.innerText = `❌ ${data.error || 'Ошибка сервера'}`;
                 }
-
             } catch (error) {
-                // Ошибка сети или CORS
+                clearInterval(pollingInterval);
                 resultOutput.className = 'error';
-                resultOutput.innerHTML = '❌ Ошибка сети или сервера: Проверьте подключение или статус API.';
-                console.error('Fetch error:', error);
+                resultOutput.innerText = '❌ Ошибка соединения с сервером.';
             } finally {
                 searchButton.disabled = false;
             }
-        });
+        }
+
+        searchButton.addEventListener('click', sendSearch);
     </script>
 </body>
 </html>
