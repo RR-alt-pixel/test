@@ -2,6 +2,7 @@
 import os
 import time
 import json
+import random
 import itertools
 import traceback
 from threading import Thread, Lock
@@ -11,8 +12,6 @@ from queue import Queue
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-
-# Playwright (синхронный)
 from playwright.sync_api import sync_playwright, Browser, Page
 
 # ================== 1. НАСТРОЙКИ ==================
@@ -34,14 +33,21 @@ TOKENS_LOCK = Lock()
 
 # ================== 2. АККАУНТЫ ==================
 accounts = [
-    {"username": "blue7", "password": "842dfghm"},
-    {"username": "blue8", "password": "89df45bg"},
-    {"username": "blue9", "password": "3363f44d"},
+    {"username": "pink7", "password": "85tg24vd"},
+    {"username": "pink8", "password": "14gh1223"},
+    {"username": "pink9", "password": "845ghj65"},
 ]
 
 # ================== 3. ПУЛ ТОКЕНОВ ==================
 token_pool: List[Dict] = []
 token_cycle = None
+
+# Разные User-Agent для имитации разных браузеров
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
+]
 
 def load_tokens_from_file() -> List[Dict]:
     global token_pool, token_cycle
@@ -81,13 +87,10 @@ def login_crm_playwright(username: str, password: str, p, show_browser: bool = F
         print(f"[PLW] 🔵 Вход под {username}...")
         browser = p.chromium.launch(
             headless=not show_browser,
-            args=[
-                "--no-sandbox", "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage", "--disable-gpu"
-            ],
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
             timeout=60000
         )
-        context = browser.new_context()
+        context = browser.new_context(user_agent=random.choice(USER_AGENTS))
         page: Page = context.new_page()
         page.goto(LOGIN_PAGE, wait_until="load", timeout=30000)
         page.fill(LOGIN_SELECTOR, username)
@@ -146,15 +149,14 @@ def init_token_pool_playwright(show_browser: bool = False):
 
 # ================== 6. TOKEN GETTER ==================
 def get_next_token() -> Optional[Dict]:
-    global token_cycle
-    if not token_cycle:
+    global token_pool
+    if not token_pool:
         init_token_pool_playwright()
-        if not token_cycle:
+        if not token_pool:
             return None
-    try:
-        return next(token_cycle)
-    except Exception:
-        return None
+    token = random.choice(token_pool)
+    print(f"[POOL] 🎲 Выбран токен {token['username']}")
+    return token
 
 # ================== 7. CRM GET ==================
 def refresh_token_for_username(username: str) -> Optional[Dict]:
@@ -183,9 +185,11 @@ def crm_get(endpoint: str, params: dict = None):
     if not token:
         return "❌ Нет токенов CRM."
     headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": token.get("user_agent", "python-requests"),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Connection": "keep-alive",
+        "Referer": f"{BASE_URL}/search",
+        "User-Agent": token.get("user_agent", random.choice(USER_AGENTS)),
         "Cookie": token.get("cookie_header", "")
     }
     url = endpoint if endpoint.startswith("http") else API_BASE + endpoint
@@ -207,7 +211,6 @@ crm_queue = Queue()
 RESULT_TIMEOUT = 45
 
 def crm_worker():
-    """Фоновый поток, который выполняет CRM-запросы по очереди."""
     while True:
         try:
             task = crm_queue.get()
@@ -218,7 +221,7 @@ def crm_worker():
             print(f"[QUEUE] ⚙️ Выполняю CRM-запрос (в очереди осталось {pos})")
             res = func(*args, **kwargs)
             result_box["result"] = res
-            time.sleep(1.5)  # защита от 429
+            time.sleep(random.uniform(1.0, 2.0))  # 🕒 случайная пауза между запросами
         except Exception as e:
             result_box["error"] = str(e)
         finally:
@@ -227,7 +230,6 @@ def crm_worker():
 Thread(target=crm_worker, daemon=True).start()
 
 def enqueue_crm_get(endpoint, params=None):
-    """Отправляет CRM-запрос в очередь и ждёт результат."""
     result_box = {}
     position = crm_queue.qsize() + 1
     print(f"[QUEUE] 🕒 Новый запрос. Позиция: {position}")
@@ -275,16 +277,14 @@ def search_by_iin(iin: str):
     r = enqueue_crm_get("/api/v2/person-search/by-iin", params={"iin": iin})
     if r["status"] != "ok":
         pos = r.get("queue_position", "?")
-        return f"⌛ Ваш запрос поставлен в очередь (позиция {pos}). Пожалуйста, подождите."
+        return f"⌛ Ваш запрос в очереди (позиция {pos})."
     resp = r["result"]
     if isinstance(resp, str):
         return resp
     if resp.status_code != 200:
         return f"❌ Ошибка {resp.status_code}: {resp.text}"
     p = resp.json()
-    return (f"👤 <b>{p.get('snf','')}</b>\n"
-            f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
-            f"📱 Телефон: {p.get('phone_number','')}")
+    return f"👤 <b>{p.get('snf','')}</b>\n🧾 ИИН: <code>{p.get('iin','')}</code>\n📱 Телефон: {p.get('phone_number','')}"
 
 def search_by_phone(phone: str):
     clean = ''.join(filter(str.isdigit, phone))
@@ -303,19 +303,14 @@ def search_by_phone(phone: str):
     if not data:
         return f"⚠️ Ничего не найдено по номеру {phone}"
     p = data[0] if isinstance(data, list) else data
-    return (f"👤 <b>{p.get('snf','')}</b>\n"
-            f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
-            f"📱 Телефон: {p.get('phone_number','')}")
+    return f"👤 <b>{p.get('snf','')}</b>\n🧾 ИИН: <code>{p.get('iin','')}</code>\n📱 Телефон: {p.get('phone_number','')}"
 
 def search_by_fio(text: str):
     parts = text.strip().split()
     params = {"smart_mode": "false", "limit": 10}
-    if len(parts) >= 1:
-        params["surname"] = parts[0]
-    if len(parts) >= 2:
-        params["name"] = parts[1]
-    if len(parts) >= 3:
-        params["father_name"] = parts[2]
+    if len(parts) >= 1: params["surname"] = parts[0]
+    if len(parts) >= 2: params["name"] = parts[1]
+    if len(parts) >= 3: params["father_name"] = parts[2]
     r = enqueue_crm_get("/api/v2/person-search/smart", params=params)
     if r["status"] != "ok":
         pos = r.get("queue_position", "?")
@@ -358,12 +353,10 @@ def api_search():
         reply = search_by_phone(query)
     else:
         reply = search_by_fio(query)
-
     return jsonify({"result": reply})
 
 @app.route('/api/queue-size', methods=['GET'])
 def queue_size():
-    """Показывает текущий размер очереди."""
     return jsonify({"queue_size": crm_queue.qsize()})
 
 @app.route('/api/refresh-users', methods=['POST'])
