@@ -33,20 +33,19 @@ TOKENS_LOCK = Lock()
 
 # ================== 2. АККАУНТЫ ==================
 accounts = [
-    {"username": "pink7", "password": "85tg24vd"},
-    {"username": "pink8", "password": "14gh1223"},
-    {"username": "pink9", "password": "845ghj65"},
+    {"username": "blue7", "password": "842dfghm"},
+    {"username": "blue8", "password": "89df45bg"},
+    {"username": "blue9", "password": "3363f44d"},
 ]
 
 # ================== 3. ПУЛ ТОКЕНОВ ==================
 token_pool: List[Dict] = []
 token_cycle = None
 
-# Разные User-Agent для имитации разных браузеров
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
 ]
 
 def load_tokens_from_file() -> List[Dict]:
@@ -221,7 +220,7 @@ def crm_worker():
             print(f"[QUEUE] ⚙️ Выполняю CRM-запрос (в очереди осталось {pos})")
             res = func(*args, **kwargs)
             result_box["result"] = res
-            time.sleep(random.uniform(1.0, 2.0))  # 🕒 случайная пауза между запросами
+            time.sleep(random.uniform(3.0, 6.0))  # 🕒 Анти-бот задержка
         except Exception as e:
             result_box["error"] = str(e)
         finally:
@@ -273,7 +272,81 @@ def periodic_fetch():
         time.sleep(FETCH_INTERVAL)
 
 # ================== 9. SEARCH ==================
-+7 747 497 5303
+def search_by_iin(iin: str):
+    r = enqueue_crm_get("/api/v2/person-search/by-iin", params={"iin": iin})
+    if r["status"] != "ok":
+        pos = r.get("queue_position", "?")
+        return f"⌛ Ваш запрос в очереди (позиция {pos})."
+    resp = r["result"]
+    if isinstance(resp, str): return resp
+    if resp.status_code == 404: return "⚠️ Ничего не найдено по ИИН."
+    if resp.status_code != 200: return f"❌ Ошибка {resp.status_code}: {resp.text}"
+    p = resp.json()
+    return (
+        f"👤 <b>{p.get('snf','')}</b>\n"
+        f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
+        f"📅 Дата рождения: {p.get('birthday','')}\n"
+        f"🚻 Пол: {p.get('sex','')}\n"
+        f"📱 Телефон: {p.get('phone_number','')}\n"
+        f"🏠 Адрес: {p.get('address','')}"
+    )
+
+def search_by_phone(phone: str):
+    clean = ''.join(filter(str.isdigit, phone))
+    if clean.startswith("8"): clean = "7" + clean[1:]
+    r = enqueue_crm_get("/api/v2/person-search/by-phone", params={"phone": clean})
+    if r["status"] != "ok":
+        pos = r.get("queue_position", "?")
+        return f"⌛ Ваш запрос в очереди (позиция {pos})."
+    resp = r["result"]
+    if isinstance(resp, str): return resp
+    if resp.status_code == 404: return f"⚠️ Ничего не найдено по номеру {phone}"
+    if resp.status_code != 200: return f"❌ Ошибка {resp.status_code}: {resp.text}"
+    data = resp.json()
+    if not data: return f"⚠️ Ничего не найдено по номеру {phone}"
+    p = data[0] if isinstance(data, list) else data
+    return (
+        f"👤 <b>{p.get('snf','')}</b>\n"
+        f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
+        f"📅 Дата рождения: {p.get('birthday','')}\n"
+        f"🚻 Пол: {p.get('sex','')}\n"
+        f"📱 Телефон: {p.get('phone_number','')}\n"
+        f"🏠 Адрес: {p.get('address','')}"
+    )
+
+def search_by_fio(text: str):
+    if text.startswith(",,"):
+        parts = text[2:].strip().split()
+        if len(parts) < 2: return "⚠️ Укажите имя и отчество после ',,'"
+        q = {"name": parts[0], "father_name": " ".join(parts[1:]), "smart_mode": "false", "limit": 10}
+    else:
+        parts = text.split(" ")
+        params = {}
+        if len(parts) >= 1 and parts[0] != "": params["surname"] = parts[0]
+        if len(parts) >= 2 and parts[1] != "": params["name"] = parts[1]
+        if len(parts) >= 3 and parts[2] != "": params["father_name"] = parts[2]
+        q = {**params, "smart_mode": "false", "limit": 10}
+    r = enqueue_crm_get("/api/v2/person-search/smart", params=q)
+    if r["status"] != "ok":
+        pos = r.get("queue_position", "?")
+        return f"⌛ Ваш запрос в очереди (позиция {pos})."
+    resp = r["result"]
+    if isinstance(resp, str): return resp
+    if resp.status_code == 404: return "⚠️ Ничего не найдено."
+    if resp.status_code != 200: return f"❌ Ошибка {resp.status_code}: {resp.text}"
+    data = resp.json()
+    if not data: return "⚠️ Ничего не найдено."
+    if isinstance(data, dict): data = [data]
+    results = []
+    for i, p in enumerate(data[:10], start=1):
+        results.append(
+            f"{i}. 👤 <b>{p.get('snf','')}</b>\n"
+            f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
+            f"📅 Дата рождения: {p.get('birthday','')}\n"
+            f"🚻 Пол: {p.get('sex','')}\n"
+            f"🌍 Национальность: {p.get('nationality','')}"
+        )
+    return "📌 Результаты поиска по ФИО:\n\n" + "\n".join(results)
 
 # ================== 10. FLASK ==================
 app = Flask(__name__)
