@@ -227,7 +227,7 @@ def crm_worker():
             print(f"[QUEUE] ⚙️ Выполняю CRM-запрос (в очереди осталось {pos})")
             res = func(*args, **kwargs)
             result_box["result"] = res
-            time.sleep(random.uniform(3.0, 6.0))  # 🕒 Анти-бот задержка
+            time.sleep(random.uniform(1.2, 2.2))  # 🕒 Анти-бот задержка
         except Exception as e:
             result_box["error"] = str(e)
         finally:
