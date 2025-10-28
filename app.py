@@ -35,10 +35,8 @@ TOKENS_LOCK = Lock()
 accounts = [
     {"username": "Gray1", "password": "84eB90lb"},
     {"username": "Brown7", "password": "72zW74fg"},
-    {"username": "Gray4", "password": "90uX90fk"},
     {"username": "Brown8", "password": "78hH71zu"},
     {"username": "Brown10", "password": "74oJ90ol"},
-    {"username": "Gray8", "password": "70qQ69eb"},
     {"username": "Brown9", "password": "82bR73gh"},
 ]
 
