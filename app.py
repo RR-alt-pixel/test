@@ -33,16 +33,12 @@ TOKENS_LOCK = Lock()
 
 # ================== 2. АККАУНТЫ ==================
 accounts = [
-    {"username": "Gray1", "password": "84eB90lb"},
-    {"username": "Gray2", "password": "75iT68rf"},
-    {"username": "Gray3", "password": "66tK81xr"},
-    {"username": "Gray4", "password": "90uX90fk"},
-    {"username": "Gray5", "password": "68nM71ec"},
-    {"username": "Gray6", "password": "67sT78nz"},
-    {"username": "Gray7", "password": "71bI77bi"},
-    {"username": "Gray8", "password": "70qQ69eb"},
-    {"username": "Gray9", "password": "86dO72oy"},
-    {"username": "Gray10", "password": "75yQ74qd"},
+    {"username": "Gray4", "password": "70Tk77Hk"},
+    {"username": "Gray5", "password": "71oB65fF"},
+    {"username": "Gray6", "password": "78Hk83Ga"},
+    {"username": "Gray7", "password": "67wR76xT"},
+    {"username": "Gray8", "password": "68Bg68Uk"},
+    {"username": "Gray9", "password": "89fO85jO"},
 ]
 
 # ================== 3. ПУЛ ТОКЕНОВ ==================
