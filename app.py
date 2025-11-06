@@ -33,7 +33,6 @@ TOKENS_LOCK = Lock()
 
 # ================== 2. АККАУНТЫ ==================
 accounts = [
-    {"username": "bear2", "password": "66pQ77aZ"},
     {"username": "bear3", "password": "68Es77Cx"},
     {"username": "Gray7", "password": "67wR76xT"},
     {"username": "Gray8", "password": "68Bg68Uk"},
