@@ -33,12 +33,21 @@ TOKENS_LOCK = Lock()
 
 # ================== 2. АККАУНТЫ ==================
 accounts = [
+    {"username": "bear1", "password": "79Cx78Qg"},
+    {"username": "bear2", "password": "66pQ77aZ"},
     {"username": "bear3", "password": "68Es77Cx"},
+    {"username": "bear4", "password": "67xC90qC"},
+    {"username": "bear5", "password": "80Sh69Op"},
+    {"username": "Gray4", "password": "70Tk77Hk"},
+    {"username": "Gray5", "password": "71oB65fF"},
+    {"username": "Gray6", "password": "78Hk83Ga"},
     {"username": "Gray7", "password": "67wR76xT"},
     {"username": "Gray8", "password": "68Bg68Uk"},
+    {"username": "Gray9", "password": "89fO85jO"},
     {"username": "gold6", "password": "79Lj65Uz"},
     {"username": "gold7", "password": "78bJ87fI"},
     {"username": "gold8", "password": "73Za81Fx"},
+    {"username": "gold9", "password": "68rK66rZ"},
 ]
 
 # ================== 3. ПУЛ ТОКЕНОВ ==================
@@ -150,15 +159,30 @@ def init_token_pool_playwright(show_browser: bool = False):
         print("[POOL] ❌ Пустой пул токенов.")
 
 # ================== 6. TOKEN GETTER ==================
+# ================== 6. TOKEN GETTER ==================
 def get_next_token() -> Optional[Dict]:
-    global token_pool
+    global token_pool, token_cycle
     if not token_pool:
         init_token_pool_playwright()
         if not token_pool:
             return None
-    token = random.choice(token_pool)
-    print(f"[POOL] 🎲 Выбран токен {token['username']}")
-    return token
+
+    # Если цикл не создан — создаём его
+    if token_cycle is None:
+        token_cycle = itertools.cycle(token_pool)
+
+    # Берём следующий токен по очереди
+    try:
+        token = next(token_cycle)
+        print(f"[POOL] 🔁 Используется токен {token['username']}")
+        return token
+    except StopIteration:
+        # Если цикл почему-то прервался — пересоздаём
+        token_cycle = itertools.cycle(token_pool)
+        token = next(token_cycle)
+        print(f"[POOL] ♻️ Перезапуск цикла, выбран {token['username']}")
+        return token
+
 
 # ================== 7. CRM GET ==================
 def refresh_token_for_username(username: str) -> Optional[Dict]:
