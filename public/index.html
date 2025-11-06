@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
+    <meta charset="UTF-8">
     <title>SherLOCK CRM Mini App</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
@@ -14,6 +15,10 @@
         h1 {
             text-align: center;
             font-weight: 600;
+            margin-top: 10px;
+        }
+        p {
+            margin: 5px 0;
         }
         input[type="text"] {
             width: 100%;
@@ -37,8 +42,9 @@
             font-size: 16px;
         }
         button:disabled {
-            opacity: 0.7;
+            opacity: 0.6;
             cursor: not-allowed;
+            background-color: #666;
         }
         .result, .error, .queue {
             white-space: pre-wrap;
@@ -57,11 +63,17 @@
             text-align: center;
             font-style: italic;
         }
+        #footer {
+            text-align: center;
+            margin-top: 25px;
+            font-size: 12px;
+            color: var(--tg-theme-hint-color);
+        }
     </style>
 </head>
 <body>
     <div id="app">
-        <h1>SherLOCK</h1>
+        <h1>Hogwarts</h1>
         <p>Введите данные для поиска:</p>
         <input type="text" id="queryInput" placeholder="ИИН, ФИО или номер телефона">
         <button id="searchButton">ИСКАТЬ</button>
@@ -69,8 +81,10 @@
         <div id="resultOutput" class="result">Здесь появится результат.</div>
     </div>
 
+    <div id="footer">@harryyyy_potter_bot</div>
+
     <script>
-        const API_BASE_URL = "https://test-2-tkqp.onrender.com";  // ✅ Твой API на Render
+        const API_BASE_URL = "https://test-2-tkqp.onrender.com"; // твой API Render
 
         const queryInput = document.getElementById('queryInput');
         const searchButton = document.getElementById('searchButton');
@@ -78,6 +92,9 @@
         const queueStatus = document.getElementById('queueStatus');
 
         let pollingInterval = null;
+        let lastQuery = null;
+        let lastClickTime = 0;
+        const COOLDOWN_MS = 10000; // 10 секунд защита от спама
 
         if (window.Telegram && window.Telegram.WebApp) {
             Telegram.WebApp.ready();
@@ -98,6 +115,18 @@
 
         async function sendSearch() {
             const query = queryInput.value.trim();
+            const now = Date.now();
+
+            // Антиспам: защита от повторов одного запроса
+            if (query === lastQuery && now - lastClickTime < COOLDOWN_MS) {
+                const waitSec = Math.ceil((COOLDOWN_MS - (now - lastClickTime)) / 1000);
+                resultOutput.className = 'queue';
+                resultOutput.innerText = `⚠️ Подождите ${waitSec} сек перед повторным запросом.`;
+                return;
+            }
+            lastQuery = query;
+            lastClickTime = now;
+
             if (!query) {
                 resultOutput.className = 'error';
                 resultOutput.innerText = 'Введите запрос.';
@@ -115,12 +144,13 @@
                 return;
             }
 
+            // блокировка кнопки
             searchButton.disabled = true;
             resultOutput.className = 'result';
             resultOutput.innerText = '⌛ Отправка запроса...';
             queueStatus.innerText = '';
 
-            // Запускаем фоновое обновление очереди
+            // обновление очереди каждые 2,5 секунды
             if (pollingInterval) clearInterval(pollingInterval);
             pollingInterval = setInterval(checkQueueSize, 2500);
 
@@ -150,7 +180,8 @@
                 resultOutput.className = 'error';
                 resultOutput.innerText = '❌ Ошибка соединения с сервером.';
             } finally {
-                searchButton.disabled = false;
+                // задержка перед повторным включением кнопки
+                setTimeout(() => { searchButton.disabled = false; }, 1500);
             }
         }
 
