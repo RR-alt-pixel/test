@@ -412,6 +412,55 @@ def refresh_users():
     fetch_allowed_users()
     return jsonify({"ok": True, "count": len(ALLOWED_USER_IDS)})
 
+def search_by_address(address: str):
+    print(f"[SEARCH] 🔍 Поиск по адресу: {address}")
+
+    r = enqueue_crm_get("/api/v2/person-search/by-address", params={
+        "address": address,
+        "exact_match": "false",
+        "limit": 100
+    })
+
+    if r["status"] != "ok":
+        pos = r.get("queue_position", "?")
+        return f"⌛ Ваш запрос в очереди (позиция {pos})."
+
+    resp = r["result"]
+    if isinstance(resp, str):
+        return resp
+
+    if resp.status_code == 404:
+        return f"⚠️ Ничего не найдено по адресу: {address}"
+    if resp.status_code != 200:
+        return f"❌ Ошибка {resp.status_code}: {resp.text}"
+
+    try:
+        data = resp.json()
+    except Exception:
+        return f"❌ Ошибка разбора ответа от CRM."
+
+    if not data:
+        return f"⚠️ Ничего не найдено по адресу: {address}"
+
+    if isinstance(data, dict):
+        data = [data]
+
+    results = []
+    for i, p in enumerate(data[:10], start=1):
+        addr = p.get("address", "")
+        if len(addr) > 120:
+            addr = addr[:120] + "..."
+        results.append(
+            f"{i}. 👤 <b>{p.get('snf','')}</b>\n"
+            f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
+            f"📅 {p.get('birthday','')}\n"
+            f"🚻 {p.get('sex','')}\n"
+            f"🌍 {p.get('nationality','')}\n"
+            f"🏠 {addr}"
+        )
+
+    return "📍 Результаты поиска по адресу:\n\n" + "\n\n".join(results)
+
 # ================== 11. STARTUP ==================
 print("🚀 Запуск API с очередью запросов...")
 fetch_allowed_users()
