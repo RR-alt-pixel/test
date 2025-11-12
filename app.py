@@ -376,19 +376,21 @@ def search_by_fio(text: str):
     return "📌 Результаты поиска по ФИО:\n\n" + "\n".join(results)
 
 def search_by_address(address: str):
-    print(f"[SEARCH] 🔍 Поиск по адресу: {address}")
+    """
+    Поиск по адресу — повторяет точный формат CRM:
+    GET /api/v2/person-search/by-address?address=...&exact_match=false&limit=100
+    """
+    addr = address.strip()
+    if not addr:
+        return "⚠️ Пустой адрес."
 
-    # Удаляем лишние знаки, чтобы не ломать поиск
-    clean = address.replace(":", " ").replace(";", " ").replace("  ", " ")
-    clean = " ".join(clean.split())
-
-    # Пробуем полный адрес
     params = {
-        "address": clean,
+        "address": addr,
         "exact_match": "false",
         "limit": 100
     }
 
+    print(f"[SEARCH] 🌍 Поиск по адресу: {addr}")
     r = enqueue_crm_get("/api/v2/person-search/by-address", params=params)
 
     if r["status"] != "ok":
@@ -399,53 +401,38 @@ def search_by_address(address: str):
     if isinstance(resp, str):
         return resp
 
-    # Если CRM не справилась с длинным адресом
-    if resp.status_code == 400:
-        print("[SEARCH] ⚠️ Ошибка 400, пробуем укороченный адрес.")
-        # оставляем первые 3 фрагмента (область, район, улица)
-        parts = clean.split()
-        short_addr = " ".join(parts[:10])
-        r2 = enqueue_crm_get("/api/v2/person-search/by-address", params={
-            "address": short_addr,
-            "exact_match": "false",
-            "limit": 50
-        })
-        resp = r2["result"] if r2["status"] == "ok" else None
-
-        if not resp or isinstance(resp, str):
-            return "⚠️ Не удалось выполнить поиск по адресу. Попробуйте сократить запрос."
-
     if resp.status_code == 404:
-        return f"⚠️ Ничего не найдено по адресу: {clean}"
+        return f"⚠️ Ничего не найдено по адресу."
+    if resp.status_code == 400:
+        return f"❌ Ошибка 400: {resp.text}"
     if resp.status_code != 200:
         return f"❌ Ошибка {resp.status_code}: {resp.text}"
 
     try:
         data = resp.json()
     except Exception:
-        return f"❌ Ошибка разбора ответа от CRM."
+        return "❌ Ошибка при разборе ответа CRM."
 
     if not data:
-        return f"⚠️ Ничего не найдено по адресу: {clean}"
+        return "⚠️ Ничего не найдено по адресу."
 
+    # Обрабатываем как список
     if isinstance(data, dict):
         data = [data]
 
     results = []
-    for i, p in enumerate(data[:10], start=1):
-        addr = p.get("address", "")
-        if len(addr) > 120:
-            addr = addr[:120] + "..."
+    for i, p in enumerate(data[:20], start=1):
         results.append(
             f"{i}. 👤 <b>{p.get('snf','')}</b>\n"
             f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
-            f"📅 {p.get('birthday','')}\n"
-            f"🚻 {p.get('sex','')}\n"
-            f"🌍 {p.get('nationality','')}\n"
-            f"🏠 {addr}"
+            f"📅 Дата рождения: {p.get('birthday','')}\n"
+            f"🚻 Пол: {p.get('sex','')}\n"
+            f"🌍 Национальность: {p.get('nationality','')}\n"
+            f"🏠 Адрес: {p.get('address','')}"
         )
 
-    return "📍 Результаты поиска по адресу:\n\n" + "\n\n".join(results)
+    return "📌 Результаты поиска по адресу:\n\n" + "\n\n".join(results)
+
 
 
 # ================== 10. FLASK ==================
