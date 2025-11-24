@@ -44,10 +44,10 @@ accounts = [
     {"username": "Gray7", "password": "67wR76xT"},
     {"username": "Gray8", "password": "68Bg68Uk"},
     {"username": "Gray9", "password": "89fO85jO"},
-    {"username": "gold6", "password": "79Lj65Uz"},
-    {"username": "gold7", "password": "78bJ87fI"},
-    {"username": "gold8", "password": "73Za81Fx"},
-    {"username": "gold9", "password": "68rK66rZ"},
+    {"username": "gold6", "password": "68kP82iX"},
+    {"username": "gold7", "password": "68Tw67Vx"},
+    {"username": "gold8", "password": "81mB66jD"},
+    {"username": "gold9", "password": "71Vm81Fx"},
 ]
 
 # ================== 3. ПУЛ ТОКЕНОВ ==================
