@@ -280,63 +280,79 @@ def periodic_fetch():
 def search_by_iin(iin: str):
     r = enqueue_crm_get("/api/v2/person-search/by-iin", params={"iin": iin})
     if r["status"] != "ok":
-        return "⌛ Запрос в очереди."
+        pos = r.get("queue_position", "?")
+        return f"⌛ Ваш запрос в очереди (позиция {pos})."
     resp = r["result"]
-    if isinstance(resp, str):
-        return resp
-    if resp.status_code != 200:
-        return f"❌ Ошибка {resp.status_code}"
+    if isinstance(resp, str): return resp
+    if resp.status_code == 404: return "⚠️ Ничего не найдено по ИИН."
+    if resp.status_code != 200: return f"❌ Ошибка {resp.status_code}: {resp.text}"
     p = resp.json()
-    return f"👤 {p.get('snf','')}\n🧾 ИИН: {p.get('iin','')}\n📱 Телефон: {p.get('phone_number','')}"
+    return (
+        f"👤 <b>{p.get('snf','')}</b>\n"
+        f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
+        f"📅 Дата рождения: {p.get('birthday','')}\n"
+        f"🚻 Пол: {p.get('sex','')}\n"
+        f"📱 Телефон: {p.get('phone_number','')}\n"
+        f"🏠 Адрес: {p.get('address','')}"
+    )
+
 
 def search_by_phone(phone: str):
     clean = ''.join(filter(str.isdigit, phone))
-    if clean.startswith("8"):
-        clean = "7" + clean[1:]
+    if clean.startswith("8"): clean = "7" + clean[1:]
     r = enqueue_crm_get("/api/v2/person-search/by-phone", params={"phone": clean})
     if r["status"] != "ok":
-        return "⌛ В очереди."
+        pos = r.get("queue_position", "?")
+        return f"⌛ Ваш запрос в очереди (позиция {pos})."
     resp = r["result"]
-    if isinstance(resp, str):
-        return resp
-    if resp.status_code != 200:
-        return f"❌ Ошибка {resp.status_code}"
+    if isinstance(resp, str): return resp
+    if resp.status_code == 404: return f"⚠️ Ничего не найдено по номеру {phone}"
+    if resp.status_code != 200: return f"❌ Ошибка {resp.status_code}: {resp.text}"
     data = resp.json()
-    if isinstance(data, list):
-        data = data[0]
-    return f"👤 {data.get('snf','')}\n🧾 ИИН: {data.get('iin','')}\n📱 {data.get('phone_number','')}"
+    if not data: return f"⚠️ Ничего не найдено по номеру {phone}"
+    p = data[0] if isinstance(data, list) else data
+    return (
+        f"👤 <b>{p.get('snf','')}</b>\n"
+        f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
+        f"📅 Дата рождения: {p.get('birthday','')}\n"
+        f"🚻 Пол: {p.get('sex','')}\n"
+        f"📱 Телефон: {p.get('phone_number','')}\n"
+        f"🏠 Адрес: {p.get('address','')}"
+    )
 
 def search_by_fio(text: str):
     if text.startswith(",,"):
         parts = text[2:].strip().split()
-        if len(parts) < 2:
-            return "⚠️ Укажите имя и отчество после ',,'"
+        if len(parts) < 2: return "⚠️ Укажите имя и отчество после ',,'"
         q = {"name": parts[0], "father_name": " ".join(parts[1:]), "smart_mode": "false", "limit": 10}
     else:
-        parts = text.split()
+        parts = text.split(" ")
         params = {}
-        if len(parts) >= 1:
-            params["surname"] = parts[0]
-        if len(parts) >= 2:
-            params["name"] = parts[1]
-        if len(parts) >= 3:
-            params["father_name"] = parts[2]
+        if len(parts) >= 1 and parts[0] != "": params["surname"] = parts[0]
+        if len(parts) >= 2 and parts[1] != "": params["name"] = parts[1]
+        if len(parts) >= 3 and parts[2] != "": params["father_name"] = parts[2]
         q = {**params, "smart_mode": "false", "limit": 10}
     r = enqueue_crm_get("/api/v2/person-search/smart", params=q)
     if r["status"] != "ok":
-        return "⌛ В очереди."
+        pos = r.get("queue_position", "?")
+        return f"⌛ Ваш запрос в очереди (позиция {pos})."
     resp = r["result"]
-    if isinstance(resp, str):
-        return resp
-    if resp.status_code != 200:
-        return f"❌ Ошибка {resp.status_code}"
+    if isinstance(resp, str): return resp
+    if resp.status_code == 404: return "⚠️ Ничего не найдено."
+    if resp.status_code != 200: return f"❌ Ошибка {resp.status_code}: {resp.text}"
     data = resp.json()
-    if isinstance(data, dict):
-        data = [data]
+    if not data: return "⚠️ Ничего не найдено."
+    if isinstance(data, dict): data = [data]
     results = []
     for i, p in enumerate(data[:10], start=1):
-        results.append(f"{i}. {p.get('snf','')} — {p.get('iin','')}")
-    return "\n".join(results)
+        results.append(
+            f"{i}. 👤 <b>{p.get('snf','')}</b>\n"
+            f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
+            f"📅 Дата рождения: {p.get('birthday','')}\n"
+            f"🚻 Пол: {p.get('sex','')}\n"
+            f"🌍 Национальность: {p.get('nationality','')}"
+        )
+    return "📌 Результаты поиска по ФИО:\n\n" + "\n".join(results)
 
 def search_by_address(address: str):
     params = {"address": address, "exact_match": "false", "limit": 50}
