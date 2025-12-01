@@ -208,6 +208,13 @@ def crm_get(endpoint: str, params: dict = None):
         "User-Agent": token.get("user_agent", random.choice(USER_AGENTS)),
         "Cookie": token.get("cookie_header", "")
     }
+
+    # 💡 Исправление: правильный Referer для by-address
+    if "/by-address" in endpoint:
+        headers["Referer"] = f"{BASE_URL}/person-search"
+    else:
+        headers["Referer"] = f"{BASE_URL}/search"
+
     url = endpoint if endpoint.startswith("http") else API_BASE + endpoint
     try:
         r = requests.get(url, headers=headers, params=params, timeout=20)
@@ -221,6 +228,7 @@ def crm_get(endpoint: str, params: dict = None):
         return r
     except Exception as e:
         return f"❌ Ошибка CRM: {e}"
+
 
 # ================== 8. ОЧЕРЕДЬ CRM ==================
 crm_queue = Queue()
