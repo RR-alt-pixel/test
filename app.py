@@ -15,7 +15,7 @@ from flask_cors import CORS
 from playwright.sync_api import sync_playwright, Browser, Page
 
 # ================== 1. НАСТРОЙКИ ==================
-BOT_TOKEN = "8205898720:AAFP5EU1MKIM9q9SKflrq7aNXMq82M0tv5s"
+BOT_TOKEN = "8545598161:AAGM6HtppAjUOuSAYH0mX5oNcPU0SuO59N4"
 ALLOWED_USERS_URL = "https://raw.githubusercontent.com/RR-alt-pixel/test/refs/heads/main/allowed_ids.json"
 ALLOWED_USER_IDS: List[int] = [0]
 
