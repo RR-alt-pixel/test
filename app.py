@@ -433,6 +433,24 @@ def api_search():
         reply = search_by_fio(query)
     return jsonify({"result": reply})
 
+# ------------------ СЛУЖЕБНЫЕ API ------------------
+
+@app.route('/api/queue-size', methods=['GET'])
+def queue_size():
+    """Проверить размер очереди CRM"""
+    return jsonify({"queue_size": crm_queue.qsize()})
+
+
+@app.route('/api/refresh-users', methods=['POST'])
+def refresh_users():
+    """Обновить список разрешённых Telegram ID"""
+    auth_header = request.headers.get('Authorization')
+    if auth_header != f"Bearer {SECRET_TOKEN}":
+        return jsonify({"error": "Forbidden"}), 403
+    fetch_allowed_users()
+    return jsonify({"ok": True, "count": len(ALLOWED_USER_IDS)})
+
+
 # ================== 12. ЗАПУСК ==================
 print("🚀 Запуск API с очередью запросов...")
 fetch_allowed_users()
