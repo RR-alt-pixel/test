@@ -33,21 +33,21 @@ TOKENS_LOCK = Lock()
 
 # ================== 2. АККАУНТЫ ==================
 accounts = [
-    {"username": "bear1", "password": "79Cx78Qg"},
-    {"username": "bear2", "password": "66pQ77aZ"},
-    {"username": "bear3", "password": "68Es77Cx"},
-    {"username": "bear4", "password": "67xC90qC"},
-    {"username": "bear5", "password": "80Sh69Op"},
-    {"username": "Gray4", "password": "70Tk77Hk"},
-    {"username": "Gray5", "password": "71oB65fF"},
-    {"username": "Gray6", "password": "78Hk83Ga"},
-    {"username": "Gray7", "password": "67wR76xT"},
-    {"username": "Gray8", "password": "68Bg68Uk"},
-    {"username": "Gray9", "password": "89fO85jO"},
-    {"username": "gold6", "password": "68kP82iX"},
-    {"username": "gold7", "password": "68Tw67Vx"},
-    {"username": "gold8", "password": "81mB66jD"},
-    {"username": "gold9", "password": "71Vm81Fx"},
+    {"username": "bolt6", "password": "87wH68wL"},
+    {"username": "bolt7", "password": "78Tf76Sl"},
+    {"username": "bolt8", "password": "66rM82wK"},
+    {"username": "bolt9", "password": "88Kb69Gl"},
+    {"username": "bolt10", "password": "67dL73kD"},
+    {"username": "storm1", "password": "69Cx89Om"},
+    {"username": "storm2", "password": "65mT66oF"},
+    {"username": "storm3", "password": "77Hg68Za"},
+    {"username": "storm4", "password": "66aK70oL"},
+    {"username": "storm5", "password": "67Zz68Gc"},
+    {"username": "storm6", "password": "77vN68bR"},
+    {"username": "storm7", "password": "88Tr76Kh"},
+    {"username": "storm8", "password": "79bI90hB"},
+    {"username": "storm9", "password": "88Mg85Ht"},
+    {"username": "storm10", "password": "65qF90aW"},
 ]
 
 # ================== 3. ПУЛ ТОКЕНОВ ==================
