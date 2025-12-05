@@ -48,6 +48,8 @@ accounts = [
     {"username": "storm8", "password": "79bI90hB"},
     {"username": "storm9", "password": "88Mg85Ht"},
     {"username": "storm10", "password": "65qF90aW"},
+    {"username": "flame3", "password": "83Ny79Wz"},
+    {"username": "flame4", "password": "71dB69iU"},
 ]
 
 # ================== 3. ПУЛ ТОКЕНОВ ==================
