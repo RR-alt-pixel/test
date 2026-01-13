@@ -414,18 +414,29 @@ def start_session():
     if int(user_id) not in ALLOWED_USER_IDS:
         return jsonify({"error": "Нет доступа"}), 403
 
-    # если уже есть активная сессия — запрещаем выдачу новой
+    now = time.time()
     existing = active_sessions.get(user_id)
-    if existing and (time.time() - existing["created"]) < SESSION_TTL:
-        return jsonify({"error": "Сессия уже активна, попробуйте позже."}), 403
 
-    session_token = f"{user_id}-{int(time.time())}-{random.randint(1000,9999)}"
+    # Проверка: если уже есть активная — запрещаем повторный запуск
+    if existing and (now - existing["created"]) < SESSION_TTL:
+        print(f"[SESSION] ❌ Попытка перезапуска сессии {user_id}, отклонено.")
+        return jsonify({"error": "Сессия уже активна. Повторите позже."}), 403
+
+    # Проверка: если старая сессия была — удаляем
+    if existing and (now - existing["created"]) >= SESSION_TTL:
+        del active_sessions[user_id]
+        print(f"[SESSION] ⏰ Истекшая сессия {user_id} удалена")
+
+    # Создаём новую
+    session_token = f"{user_id}-{int(now)}-{random.randint(1000,9999)}"
     active_sessions[user_id] = {
         "token": session_token,
-        "created": time.time()
+        "created": now
     }
-    print(f"[SESSION] 🔑 Активирована сессия для {user_id} (1 час)")
+
+    print(f"[SESSION] 🔑 Активирована новая сессия для {user_id}")
     return jsonify({"session_token": session_token})
+
 
 @app.before_request
 def validate_session():
@@ -438,13 +449,15 @@ def validate_session():
         if not session:
             return jsonify({"error": "Сессия не найдена. Авторизуйтесь заново."}), 403
 
+        # защита от второго устройства
         if session["token"] != token:
-            return jsonify({"error": "Сессия недействительна. Возможно, вы вошли с другого устройства."}), 403
+            print(f"[SESSION] ⚠️ Несовпадение токена: uid={uid}")
+            return jsonify({"error": "Сессия недействительна. Вход возможен только с одного устройства."}), 403
 
         if time.time() - session["created"] > SESSION_TTL:
             del active_sessions[uid]
-            print(f"[SESSION] ⏰ Истек срок действия сессии для {uid}")
-            return jsonify({"error": "⏰ Ваша сессия истекла. Авторизуйтесь заново."}), 403
+            print(f"[SESSION] ⏰ Истек срок действия сессии {uid}")
+            return jsonify({"error": "Сессия истекла. Авторизуйтесь заново."}), 403
 
 @app.route('/api/search', methods=['POST'])
 def api_search():
