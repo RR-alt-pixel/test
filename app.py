@@ -414,18 +414,19 @@ def start_session():
     if int(user_id) not in ALLOWED_USER_IDS:
         return jsonify({"error": "Нет доступа"}), 403
 
-    if user_id in active_sessions:
-        session = active_sessions[user_id]
-        if time.time() - session["created"] < SESSION_TTL:
-            remaining = int((SESSION_TTL - (time.time() - session["created"])) / 60)
-            return jsonify({"error": f"Сессия уже активна. Повторите через {remaining} мин."}), 403
+    # если сессия ещё активна — возвращаем старый токен
+    session = active_sessions.get(user_id)
+    if session and time.time() - session["created"] < SESSION_TTL:
+        print(f"[SESSION] 🔁 Повторный вход {user_id}, возвращаем старый токен")
+        return jsonify({"session_token": session["token"]})
 
+    # создаём новую сессию
     session_token = f"{user_id}-{int(time.time())}-{random.randint(1000,9999)}"
     active_sessions[user_id] = {
         "token": session_token,
         "created": time.time()
     }
-    print(f"[SESSION] 🔑 Активирована сессия для {user_id} (1 час)")
+    print(f"[SESSION] 🔑 Новая сессия для {user_id} (1 час)")
     return jsonify({"session_token": session_token})
 
 @app.before_request
