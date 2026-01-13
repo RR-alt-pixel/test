@@ -390,7 +390,8 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ------------------ СЕССИИ ------------------
-active_sessions = {}
+active_sessions: Dict[int, Dict[str, float]] = {}
+SESSION_TTL = 3600  # время жизни сессии — 1 час
 
 @app.route('/api/session/start', methods=['POST'])
 def start_session():
@@ -400,21 +401,43 @@ def start_session():
         return jsonify({"error": "Нет Telegram ID"}), 400
     if int(user_id) not in ALLOWED_USER_IDS:
         return jsonify({"error": "Нет доступа"}), 403
-    session_token = f"{user_id}-{int(time.time())}"
-    active_sessions[user_id] = session_token
-    print(f"[SESSION] 🔑 Активирована сессия для {user_id}")
+
+    # если уже есть активная сессия, не создаём новую
+    if user_id in active_sessions:
+        session = active_sessions[user_id]
+        if time.time() - session["created"] < SESSION_TTL:
+            remaining = int((SESSION_TTL - (time.time() - session["created"])) / 60)
+            return jsonify({"error": f"Сессия уже активна. Повторите через {remaining} мин."}), 403
+
+    session_token = f"{user_id}-{int(time.time())}-{random.randint(1000,9999)}"
+    active_sessions[user_id] = {
+        "token": session_token,
+        "created": time.time()
+    }
+    print(f"[SESSION] 🔑 Активирована сессия для {user_id} (1 час)")
     return jsonify({"session_token": session_token})
 
+
+# ------------------ API ------------------
 @app.before_request
 def validate_session():
     if request.path == "/api/search" and request.method == "POST":
         data = request.json or {}
         uid = data.get("telegram_user_id")
         token = data.get("session_token")
-        if uid in active_sessions and active_sessions[uid] != token:
+
+        session = active_sessions.get(uid)
+        if not session:
+            return jsonify({"error": "Сессия не найдена. Авторизуйтесь заново."}), 403
+
+        if session["token"] != token:
             return jsonify({"error": "Сессия недействительна. Возможно, вы вошли с другого устройства."}), 403
 
-# ------------------ API ------------------
+        if time.time() - session["created"] > SESSION_TTL:
+            del active_sessions[uid]
+            print(f"[SESSION] ⏰ Истек срок действия сессии для {uid}")
+            return jsonify({"error": "⏰ Ваша сессия истекла. Авторизуйтесь заново."}), 403
+
 @app.route('/api/search', methods=['POST'])
 def api_search():
     data = request.json
@@ -461,6 +484,17 @@ print("🚀 Запуск API с очередью запросов...")
 fetch_allowed_users()
 Thread(target=periodic_fetch, daemon=True).start()
 Thread(target=init_token_pool_playwright, daemon=True).start()
+
+def cleanup_sessions():
+    while True:
+        now = time.time()
+        expired = [uid for uid, s in active_sessions.items() if now - s["created"] > SESSION_TTL]
+        for uid in expired:
+            del active_sessions[uid]
+            print(f"[SESSION] 🧹 Удалена просроченная сессия {uid}")
+        time.sleep(300)  # чистим каждые 5 минут
+
+Thread(target=cleanup_sessions, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
