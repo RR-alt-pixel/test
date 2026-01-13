@@ -214,7 +214,6 @@ def crm_get(endpoint: str, params: dict = None):
         "Cookie": token.get("cookie_header", "")
     }
 
-    # 💡 Исправление: правильный Referer для by-address
     if "/by-address" in endpoint:
         headers["Referer"] = f"{BASE_URL}/person-search"
     else:
@@ -233,8 +232,6 @@ def crm_get(endpoint: str, params: dict = None):
         return r
     except Exception as e:
         return f"❌ Ошибка CRM: {e}"
-
-
 # ================== 8. ОЧЕРЕДЬ CRM ==================
 crm_queue = Queue()
 RESULT_TIMEOUT = 45
@@ -296,9 +293,12 @@ def search_by_iin(iin: str):
         pos = r.get("queue_position", "?")
         return f"⌛ Ваш запрос в очереди (позиция {pos})."
     resp = r["result"]
-    if isinstance(resp, str): return resp
-    if resp.status_code == 404: return "⚠️ Ничего не найдено по ИИН."
-    if resp.status_code != 200: return f"❌ Ошибка {resp.status_code}: {resp.text}"
+    if isinstance(resp, str):
+        return resp
+    if resp.status_code == 404:
+        return "⚠️ Ничего не найдено по ИИН."
+    if resp.status_code != 200:
+        return f"❌ Ошибка {resp.status_code}: {resp.text}"
     p = resp.json()
     return (
         f"👤 <b>{p.get('snf','')}</b>\n"
@@ -309,20 +309,24 @@ def search_by_iin(iin: str):
         f"🏠 Адрес: {p.get('address','')}"
     )
 
-
 def search_by_phone(phone: str):
     clean = ''.join(filter(str.isdigit, phone))
-    if clean.startswith("8"): clean = "7" + clean[1:]
+    if clean.startswith("8"):
+        clean = "7" + clean[1:]
     r = enqueue_crm_get("/api/v2/person-search/by-phone", params={"phone": clean})
     if r["status"] != "ok":
         pos = r.get("queue_position", "?")
         return f"⌛ Ваш запрос в очереди (позиция {pos})."
     resp = r["result"]
-    if isinstance(resp, str): return resp
-    if resp.status_code == 404: return f"⚠️ Ничего не найдено по номеру {phone}"
-    if resp.status_code != 200: return f"❌ Ошибка {resp.status_code}: {resp.text}"
+    if isinstance(resp, str):
+        return resp
+    if resp.status_code == 404:
+        return f"⚠️ Ничего не найдено по номеру {phone}"
+    if resp.status_code != 200:
+        return f"❌ Ошибка {resp.status_code}: {resp.text}"
     data = resp.json()
-    if not data: return f"⚠️ Ничего не найдено по номеру {phone}"
+    if not data:
+        return f"⚠️ Ничего не найдено по номеру {phone}"
     p = data[0] if isinstance(data, list) else data
     return (
         f"👤 <b>{p.get('snf','')}</b>\n"
@@ -336,26 +340,35 @@ def search_by_phone(phone: str):
 def search_by_fio(text: str):
     if text.startswith(",,"):
         parts = text[2:].strip().split()
-        if len(parts) < 2: return "⚠️ Укажите имя и отчество после ',,'"
+        if len(parts) < 2:
+            return "⚠️ Укажите имя и отчество после ',,'"
         q = {"name": parts[0], "father_name": " ".join(parts[1:]), "smart_mode": "false", "limit": 10}
     else:
         parts = text.split(" ")
         params = {}
-        if len(parts) >= 1 and parts[0] != "": params["surname"] = parts[0]
-        if len(parts) >= 2 and parts[1] != "": params["name"] = parts[1]
-        if len(parts) >= 3 and parts[2] != "": params["father_name"] = parts[2]
+        if len(parts) >= 1 and parts[0] != "":
+            params["surname"] = parts[0]
+        if len(parts) >= 2 and parts[1] != "":
+            params["name"] = parts[1]
+        if len(parts) >= 3 and parts[2] != "":
+            params["father_name"] = parts[2]
         q = {**params, "smart_mode": "false", "limit": 10}
     r = enqueue_crm_get("/api/v2/person-search/smart", params=q)
     if r["status"] != "ok":
         pos = r.get("queue_position", "?")
         return f"⌛ Ваш запрос в очереди (позиция {pos})."
     resp = r["result"]
-    if isinstance(resp, str): return resp
-    if resp.status_code == 404: return "⚠️ Ничего не найдено."
-    if resp.status_code != 200: return f"❌ Ошибка {resp.status_code}: {resp.text}"
+    if isinstance(resp, str):
+        return resp
+    if resp.status_code == 404:
+        return "⚠️ Ничего не найдено."
+    if resp.status_code != 200:
+        return f"❌ Ошибка {resp.status_code}: {resp.text}"
     data = resp.json()
-    if not data: return "⚠️ Ничего не найдено."
-    if isinstance(data, dict): data = [data]
+    if not data:
+        return "⚠️ Ничего не найдено."
+    if isinstance(data, dict):
+        data = [data]
     results = []
     for i, p in enumerate(data[:10], start=1):
         results.append(
@@ -385,13 +398,12 @@ def search_by_address(address: str):
         results.append(f"{i}. {p.get('snf','')} — {p.get('address','')}")
     return "\n".join(results)
 
-# ================== 11. FLASK ==================
+# ================== 11. FLASK + СЕССИИ ==================
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# ------------------ СЕССИИ ------------------
 active_sessions: Dict[int, Dict[str, float]] = {}
-SESSION_TTL = 3600  # время жизни сессии — 1 час
+SESSION_TTL = 3600  # 1 час
 
 @app.route('/api/session/start', methods=['POST'])
 def start_session():
@@ -402,7 +414,6 @@ def start_session():
     if int(user_id) not in ALLOWED_USER_IDS:
         return jsonify({"error": "Нет доступа"}), 403
 
-    # если уже есть активная сессия, не создаём новую
     if user_id in active_sessions:
         session = active_sessions[user_id]
         if time.time() - session["created"] < SESSION_TTL:
@@ -417,8 +428,6 @@ def start_session():
     print(f"[SESSION] 🔑 Активирована сессия для {user_id} (1 час)")
     return jsonify({"session_token": session_token})
 
-
-# ------------------ API ------------------
 @app.before_request
 def validate_session():
     if request.path == "/api/search" and request.method == "POST":
@@ -461,23 +470,17 @@ def api_search():
         reply = search_by_fio(query)
     return jsonify({"result": reply})
 
-# ------------------ СЛУЖЕБНЫЕ API ------------------
-
 @app.route('/api/queue-size', methods=['GET'])
 def queue_size():
-    """Проверить размер очереди CRM"""
     return jsonify({"queue_size": crm_queue.qsize()})
-
 
 @app.route('/api/refresh-users', methods=['POST'])
 def refresh_users():
-    """Обновить список разрешённых Telegram ID"""
     auth_header = request.headers.get('Authorization')
     if auth_header != f"Bearer {SECRET_TOKEN}":
         return jsonify({"error": "Forbidden"}), 403
     fetch_allowed_users()
     return jsonify({"ok": True, "count": len(ALLOWED_USER_IDS)})
-
 
 # ================== 12. ЗАПУСК ==================
 print("🚀 Запуск API с очередью запросов...")
@@ -492,7 +495,7 @@ def cleanup_sessions():
         for uid in expired:
             del active_sessions[uid]
             print(f"[SESSION] 🧹 Удалена просроченная сессия {uid}")
-        time.sleep(300)  # чистим каждые 5 минут
+        time.sleep(300)
 
 Thread(target=cleanup_sessions, daemon=True).start()
 
