@@ -45,11 +45,11 @@ accounts = [
     {"username": "gem5", "password": "33Vi11Vi"},
     {"username": "wok9", "password": "88Dk99Dk"},
     {"username": "gem6", "password": "44nS44nS"},
+    {"username": "gem10", "password": "11dK22dK"},
     {"username": "wok10", "password": "66cA33cA"},
     {"username": "gem7", "password": "22Pt88Pt"},
     {"username": "gem8", "password": "88yT88yT"},
     {"username": "gem9", "password": "66Kp11Kp"},
-    {"username": "gem10", "password": "11dK22dK"},
 ]
 
 # ================== 3. ПУЛ ТОКЕНОВ ==================
