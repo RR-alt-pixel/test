@@ -24,9 +24,9 @@ LOGIN_PAGE = f"{BASE_URL}/auth/login"
 API_BASE = BASE_URL
 SECRET_TOKEN = "Refresh-Server-Key-2025-Oct-VK44"
 
-LOGIN_SELECTOR = "#username"
-PASSWORD_SELECTOR = "#password"
-SIGN_IN_BUTTON_SELECTOR = "button[type='submit']"
+LOGIN_SELECTOR = 'input[placeholder="Логин"]'
+PASSWORD_SELECTOR = 'input[placeholder="Пароль"]'
+SIGN_IN_BUTTON_SELECTOR = 'button[type="submit"]'
 
 TOKENS_FILE = "tokens.json"
 TOKENS_LOCK = Lock()
