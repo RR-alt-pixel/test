@@ -248,7 +248,7 @@ def crm_worker():
             func, args, kwargs, result_box = crm_queue.get()
             res = func(*args, **kwargs)
             result_box["result"] = res
-            time.sleep(random.uniform(3.2, 5.8))
+            time.sleep(random.uniform(1.8, 2.5))
         except Exception as e:
             result_box["error"] = str(e)
         finally:
