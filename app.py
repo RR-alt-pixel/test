@@ -82,7 +82,7 @@ def save_tokens_to_file():
 def login_crm_playwright(username: str, password: str, p, show_browser: bool = False):
     browser = None
     try:
-        print(f"[PLW] 🔵 Вход под {username}...")
+        print("=== DIAG LOGIN START ===")
 
         browser = p.chromium.launch(
             headless=True,
@@ -92,8 +92,6 @@ def login_crm_playwright(username: str, password: str, p, show_browser: bool = F
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
                 "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                "--window-size=1280,800",
             ],
             timeout=60000
         )
@@ -103,57 +101,53 @@ def login_crm_playwright(username: str, password: str, p, show_browser: bool = F
             viewport={"width": 1280, "height": 800},
             locale="ru-RU",
             timezone_id="Asia/Almaty",
-            java_script_enabled=True,
         )
 
         page = context.new_page()
 
+        # Убираем webdriver-флаг
         page.add_init_script("""
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru'] });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
         """)
 
+        print("[DIAG] GOTO:", LOGIN_PAGE)
         page.goto(LOGIN_PAGE, timeout=30000)
-        page.wait_for_timeout(2500)
+        page.wait_for_timeout(4000)
+
+        print("[DIAG] FINAL URL:", page.url)
+
+        try:
+            title = page.title()
+        except Exception as e:
+            title = f"ERROR: {e}"
+        print("[DIAG] TITLE:", title)
 
         html = page.content()
-        print("HTML LEN:", len(html))
+        print("[DIAG] HTML LEN:", len(html))
 
-        inputs = page.locator("input")
-        print("INPUT COUNT:", inputs.count())
+        head = html[:800].replace("\n", " ").replace("\r", " ")
+        print("[DIAG] HTML HEAD:", head)
 
-        if inputs.count() == 0:
-            print("❌ INPUTS NOT FOUND → BOT PROTECTION")
-            return None
+        print("[DIAG] HAS <input>:", "<input" in html)
+        print("[DIAG] HAS ЛОГИН:", "Логин" in html)
+        print("[DIAG] HAS PASSWORD:", "Пароль" in html)
 
-        login_input = inputs.nth(0)
-        password_input = page.locator("input[type='password']").first
-
-        page.mouse.move(400, 300)
-        page.wait_for_timeout(600)
-
-        login_input.fill(username, force=True)
-        page.wait_for_timeout(800)
-        password_input.fill(password, force=True)
-
-        page.wait_for_timeout(500)
-        page.locator("button").first.click(force=True)
-
-        page.wait_for_timeout(3000)
+        # Признаки Cloudflare challenge
+        print("[DIAG] HAS cf-:", "cf-" in html.lower())
+        print("[DIAG] HAS cloudflare:", "cloudflare" in html.lower())
+        print("[DIAG] HAS challenge:", "challenge" in html.lower())
 
         cookies = context.cookies()
-        print(f"[PLW] 🍪 Cookies: {len(cookies)}")
+        print("[DIAG] COOKIES COUNT:", len(cookies))
+        print("[DIAG] COOKIE NAMES:", [c["name"] for c in cookies])
 
-        return {
-            "username": username,
-            "cookie_header": "; ".join(f"{c['name']}={c['value']}" for c in cookies),
-            "user_agent": page.evaluate("() => navigator.userAgent"),
-            "time": int(time.time()),
-        }
+        print("=== DIAG LOGIN END ===")
+
+        # НИЧЕГО НЕ ВОЗВРАЩАЕМ — это тест
+        return None
 
     except Exception as e:
-        print(f"[PLW ERROR] {username}: {e}")
+        print("[DIAG ERROR]:", e)
         return None
 
     finally:
