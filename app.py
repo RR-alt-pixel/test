@@ -79,56 +79,71 @@ def save_tokens_to_file():
         traceback.print_exc()
 
 # ================== 4. PLAYWRIGHT LOGIN ==================
-def login_crm_playwright(username: str, password: str, p, show_browser: bool = False) -> Optional[Dict]:
+def login_crm_playwright(username: str, password: str, p, show_browser: bool = False):
     browser = None
     try:
         print(f"[PLW] 🔵 Вход под {username}...")
 
         browser = p.chromium.launch(
-            headless=not show_browser,
+            headless=True,
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--window-size=1280,800",
             ],
             timeout=60000
         )
 
-        context = browser.new_context(user_agent=random.choice(USER_AGENTS))
-        page: Page = context.new_page()
+        context = browser.new_context(
+            user_agent=random.choice(USER_AGENTS),
+            viewport={"width": 1280, "height": 800},
+            locale="ru-RU",
+            timezone_id="Asia/Almaty",
+            java_script_enabled=True,
+        )
 
-        # 1. Заходим на страницу
+        page = context.new_page()
+
+        page.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru'] });
+        Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+        """)
+
         page.goto(LOGIN_PAGE, timeout=30000)
+        page.wait_for_timeout(2500)
 
-        # 2. Ждём DOM, а не load / form
-        page.wait_for_load_state("domcontentloaded")
+        html = page.content()
+        print("HTML LEN:", len(html))
 
-        # 3. ЖДЁМ ЕДИНСТВЕННЫЙ СТАБИЛЬНЫЙ ЯКОРЬ
-        login_input = page.locator('input[autocomplete="username"]').first
-        login_input.wait_for(state="attached", timeout=30000)
+        inputs = page.locator("input")
+        print("INPUT COUNT:", inputs.count())
 
-        password_input = page.locator('input[type="password"]').first
-        password_input.wait_for(state="attached", timeout=30000)
+        if inputs.count() == 0:
+            print("❌ INPUTS NOT FOUND → BOT PROTECTION")
+            return None
 
-        # 4. Заполняем (force — обязательно)
+        login_input = inputs.nth(0)
+        password_input = page.locator("input[type='password']").first
+
+        page.mouse.move(400, 300)
+        page.wait_for_timeout(600)
+
         login_input.fill(username, force=True)
+        page.wait_for_timeout(800)
         password_input.fill(password, force=True)
 
-        # 5. Кликаем "Войти"
-        page.locator('button[type="submit"]').first.click(force=True)
+        page.wait_for_timeout(500)
+        page.locator("button").first.click(force=True)
 
-        # 6. Даём JS поставить cookies
-        page.wait_for_timeout(2500)
+        page.wait_for_timeout(3000)
 
         cookies = context.cookies()
         print(f"[PLW] 🍪 Cookies: {len(cookies)}")
-
-        if not cookies:
-            print(f"[PLW] ❌ Cookies не получены для {username}")
-            return None
-
-        print(f"[PLW] ✅ {username} авторизован.")
 
         return {
             "username": username,
@@ -144,7 +159,6 @@ def login_crm_playwright(username: str, password: str, p, show_browser: bool = F
     finally:
         if browser:
             browser.close()
-
 
 
 # ================== 5. ПУЛ ТОКЕНОВ ИНИЦИАЛИЗАЦИЯ ==================
