@@ -98,27 +98,27 @@ def login_crm_playwright(username: str, password: str, p, show_browser: bool = F
         context = browser.new_context(user_agent=random.choice(USER_AGENTS))
         page: Page = context.new_page()
 
+        # 1. Заходим на страницу
         page.goto(LOGIN_PAGE, timeout=30000)
 
-        # 🔴 КРИТИЧНО: ждём ФОРМУ, а не input
-        page.wait_for_selector("form", timeout=30000)
+        # 2. Ждём DOM, а не load / form
+        page.wait_for_load_state("domcontentloaded")
 
-        # Берём поля через locator (устойчиво к re-render)
+        # 3. ЖДЁМ ЕДИНСТВЕННЫЙ СТАБИЛЬНЫЙ ЯКОРЬ
         login_input = page.locator('input[autocomplete="username"]').first
-        password_input = page.locator('input[type="password"]').first
-
-        # Ждём, пока они реально станут доступны
         login_input.wait_for(state="attached", timeout=30000)
+
+        password_input = page.locator('input[type="password"]').first
         password_input.wait_for(state="attached", timeout=30000)
 
-        # Заполняем ПРИНУДИТЕЛЬНО
+        # 4. Заполняем (force — обязательно)
         login_input.fill(username, force=True)
         password_input.fill(password, force=True)
 
-        # Кликаем "Войти"
-        page.locator('button[type="submit"]').click(force=True)
+        # 5. Кликаем "Войти"
+        page.locator('button[type="submit"]').first.click(force=True)
 
-        # Даём JS установить cookies
+        # 6. Даём JS поставить cookies
         page.wait_for_timeout(2500)
 
         cookies = context.cookies()
