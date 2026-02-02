@@ -83,41 +83,64 @@ def login_crm_playwright(username: str, password: str, p, show_browser: bool = F
     browser = None
     try:
         print(f"[PLW] 🔵 Вход под {username}...")
+
         browser = p.chromium.launch(
             headless=not show_browser,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+            ],
             timeout=60000
         )
+
         context = browser.new_context(user_agent=random.choice(USER_AGENTS))
         page: Page = context.new_page()
-        page.goto(LOGIN_PAGE, wait_until="load", timeout=30000)
-        page.fill(LOGIN_SELECTOR, username)
-        time.sleep(0.4)
-        page.fill(PASSWORD_SELECTOR, password)
-        time.sleep(0.4)
-        page.click(SIGN_IN_BUTTON_SELECTOR)
-        page.wait_for_timeout(2000)
+
+        # Заходим на страницу логина (SPA — без wait_until="load")
+        page.goto(LOGIN_PAGE, timeout=30000)
+
+        # Ждём, пока React реально отрисует форму
+        page.wait_for_selector('input[placeholder="Логин"]', state="visible", timeout=30000)
+        page.fill('input[placeholder="Логин"]', username)
+
+        page.wait_for_selector('input[placeholder="Пароль"]', state="visible", timeout=30000)
+        page.fill('input[placeholder="Пароль"]', password)
+
+        # Кликаем "Войти"
+        page.click('button[type="submit"]')
+
+        # Ждём завершения авторизации и установки cookies
+        page.wait_for_load_state("networkidle")
 
         cookies = context.cookies()
-        cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+        print(f"[PLW] 🍪 Cookies: {len(cookies)}")
+
+        if not cookies:
+            print(f"[PLW] ❌ Cookies не получены для {username}")
+            return None
+
+        cookie_header = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
         user_agent = page.evaluate("() => navigator.userAgent")
 
-        if cookie_header:
-            token = {
-                "username": username,
-                "cookie_header": cookie_header,
-                "user_agent": user_agent,
-                "time": int(time.time())
-            }
-            print(f"[PLW] ✅ {username} авторизован.")
-            return token
-        return None
+        print(f"[PLW] ✅ {username} авторизован.")
+
+        return {
+            "username": username,
+            "cookie_header": cookie_header,
+            "user_agent": user_agent,
+            "time": int(time.time()),
+        }
+
     except Exception as e:
         print(f"[PLW ERROR] {username}: {e}")
         return None
+
     finally:
         if browser:
             browser.close()
+
 
 # ================== 5. ПУЛ ТОКЕНОВ ИНИЦИАЛИЗАЦИЯ ==================
 def init_token_pool_playwright(show_browser: bool = False):
