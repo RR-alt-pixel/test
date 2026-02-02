@@ -19,7 +19,7 @@ BOT_TOKEN = "8545598161:AAGM6HtppAjUOuSAYH0mX5oNcPU0SuO59N4"
 ALLOWED_USERS_URL = "https://raw.githubusercontent.com/RR-alt-pixel/test/refs/heads/main/allowed_ids.json"
 ALLOWED_USER_IDS: List[int] = [0]
 
-BASE_URL = "https://pena.rest"
+BASE_URL = "https://causa.world"
 LOGIN_PAGE = f"{BASE_URL}/auth/login"
 API_BASE = BASE_URL
 SECRET_TOKEN = "Refresh-Server-Key-2025-Oct-VK44"
@@ -33,8 +33,31 @@ TOKENS_LOCK = Lock()
 
 # ================== 2. АККАУНТЫ ==================
 accounts = [
-  {"username": "dron10", "password": "9911UUbb"},
-
+  {"username": "king6", "password": "fM7575fM"},
+  {"username": "romb3", "password": "Wy7777Wy"},
+  {"username": "shok4", "password": "pC9191pC"},
+  {"username": "king1", "password": "Wl6565Wl"},
+  {"username": "romb8", "password": "wI8787wI"},
+  {"username": "king9", "password": "Rv7474Rv"},
+  {"username": "shok2", "password": "qI7777qI"},
+  {"username": "romb1", "password": "Nb8181Nb"},
+  {"username": "king4", "password": "pS6767pS"},
+  {"username": "romb6", "password": "vU8686vU"},
+  {"username": "shok5", "password": "Qz8787Qz"},
+  {"username": "king10", "password": "fF8888fF"},
+  {"username": "romb10", "password": "hC7171hC"},
+  {"username": "king2", "password": "gL7676gL"},
+  {"username": "shok1", "password": "Sn8888Sn"},
+  {"username": "romb4", "password": "LS6666LS"},
+  {"username": "king7", "password": "Lq7171Lq"},
+  {"username": "romb7", "password": "Gf8282Gf"},
+  {"username": "king5", "password": "Pr6868Pr"},
+  {"username": "romb9", "password": "Xh6767Xh"},
+  {"username": "shok3", "password": "Ph7676Ph"},
+  {"username": "romb5", "password": "Fj7474Fj"},
+  {"username": "king8", "password": "gI6565gI"},
+  {"username": "romb2", "password": "fS7373fS"},
+  {"username": "king3", "password": "Yu8787Yu"},
 ]
 
 
