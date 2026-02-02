@@ -98,21 +98,28 @@ def login_crm_playwright(username: str, password: str, p, show_browser: bool = F
         context = browser.new_context(user_agent=random.choice(USER_AGENTS))
         page: Page = context.new_page()
 
-        # Заходим на страницу логина (SPA — без wait_until="load")
         page.goto(LOGIN_PAGE, timeout=30000)
 
-        # Ждём, пока React реально отрисует форму
-        page.wait_for_selector('input[placeholder="Логин"]', state="visible", timeout=30000)
-        page.fill('input[placeholder="Логин"]', username)
+        # 🔴 КРИТИЧНО: ждём ФОРМУ, а не input
+        page.wait_for_selector("form", timeout=30000)
 
-        page.wait_for_selector('input[placeholder="Пароль"]', state="visible", timeout=30000)
-        page.fill('input[placeholder="Пароль"]', password)
+        # Берём поля через locator (устойчиво к re-render)
+        login_input = page.locator('input[autocomplete="username"]').first
+        password_input = page.locator('input[type="password"]').first
+
+        # Ждём, пока они реально станут доступны
+        login_input.wait_for(state="attached", timeout=30000)
+        password_input.wait_for(state="attached", timeout=30000)
+
+        # Заполняем ПРИНУДИТЕЛЬНО
+        login_input.fill(username, force=True)
+        password_input.fill(password, force=True)
 
         # Кликаем "Войти"
-        page.click('button[type="submit"]')
+        page.locator('button[type="submit"]').click(force=True)
 
-        # Ждём завершения авторизации и установки cookies
-        page.wait_for_load_state("networkidle")
+        # Даём JS установить cookies
+        page.wait_for_timeout(2500)
 
         cookies = context.cookies()
         print(f"[PLW] 🍪 Cookies: {len(cookies)}")
@@ -121,15 +128,12 @@ def login_crm_playwright(username: str, password: str, p, show_browser: bool = F
             print(f"[PLW] ❌ Cookies не получены для {username}")
             return None
 
-        cookie_header = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
-        user_agent = page.evaluate("() => navigator.userAgent")
-
         print(f"[PLW] ✅ {username} авторизован.")
 
         return {
             "username": username,
-            "cookie_header": cookie_header,
-            "user_agent": user_agent,
+            "cookie_header": "; ".join(f"{c['name']}={c['value']}" for c in cookies),
+            "user_agent": page.evaluate("() => navigator.userAgent"),
             "time": int(time.time()),
         }
 
@@ -140,6 +144,7 @@ def login_crm_playwright(username: str, password: str, p, show_browser: bool = F
     finally:
         if browser:
             browser.close()
+
 
 
 # ================== 5. ПУЛ ТОКЕНОВ ИНИЦИАЛИЗАЦИЯ ==================
