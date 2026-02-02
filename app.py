@@ -90,7 +90,14 @@ def login_crm_playwright(username: str, password: str, p, show_browser: bool = F
         )
         context = browser.new_context(user_agent=random.choice(USER_AGENTS))
         page: Page = context.new_page()
+
+        # Переход на страницу логина
         page.goto(LOGIN_PAGE, wait_until="load", timeout=30000)
+        page.wait_for_load_state("networkidle")
+        page.wait_for_timeout(3000)  # подождать 3 секунды на всякий случай
+        page.wait_for_selector(LOGIN_SELECTOR, timeout=10000)
+
+        # Ввод логина и пароля
         page.fill(LOGIN_SELECTOR, username)
         time.sleep(0.4)
         page.fill(PASSWORD_SELECTOR, password)
@@ -98,6 +105,7 @@ def login_crm_playwright(username: str, password: str, p, show_browser: bool = F
         page.click(SIGN_IN_BUTTON_SELECTOR)
         page.wait_for_timeout(2000)
 
+        # Сбор cookies
         cookies = context.cookies()
         cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
         user_agent = page.evaluate("() => navigator.userAgent")
@@ -112,12 +120,14 @@ def login_crm_playwright(username: str, password: str, p, show_browser: bool = F
             print(f"[PLW] ✅ {username} авторизован.")
             return token
         return None
+
     except Exception as e:
         print(f"[PLW ERROR] {username}: {e}")
         return None
     finally:
         if browser:
             browser.close()
+
 
 # ================== 5. ПУЛ ТОКЕНОВ ИНИЦИАЛИЗАЦИЯ ==================
 def init_token_pool_playwright(show_browser: bool = False):
