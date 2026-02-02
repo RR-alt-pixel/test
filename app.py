@@ -19,7 +19,7 @@ BOT_TOKEN = "8545598161:AAGM6HtppAjUOuSAYH0mX5oNcPU0SuO59N4"
 ALLOWED_USERS_URL = "https://raw.githubusercontent.com/RR-alt-pixel/test/refs/heads/main/allowed_ids.json"
 ALLOWED_USER_IDS: List[int] = [0]
 
-BASE_URL = "https://pena.rest"
+BASE_URL = "https://causa.world"
 LOGIN_PAGE = f"{BASE_URL}/auth/login"
 API_BASE = BASE_URL
 SECRET_TOKEN = "Refresh-Server-Key-2025-Oct-VK44"
@@ -33,7 +33,31 @@ TOKENS_LOCK = Lock()
 
 # ================== 2. АККАУНТЫ ==================
 accounts = [
-  {"username": "dron10", "password": "9911UUbb"},
+  {"username": "king6", "password": "fM7575fM"},
+  {"username": "romb3", "password": "Wy7777Wy"},
+  {"username": "shok4", "password": "pC9191pC"},
+  {"username": "king1", "password": "Wl6565Wl"},
+  {"username": "romb8", "password": "wI8787wI"},
+  {"username": "king9", "password": "Rv7474Rv"},
+  {"username": "shok2", "password": "qI7777qI"},
+  {"username": "romb1", "password": "Nb8181Nb"},
+  {"username": "king4", "password": "pS6767pS"},
+  {"username": "romb6", "password": "vU8686vU"},
+  {"username": "shok5", "password": "Qz8787Qz"},
+  {"username": "king10", "password": "fF8888fF"},
+  {"username": "romb10", "password": "hC7171hC"},
+  {"username": "king2", "password": "gL7676gL"},
+  {"username": "shok1", "password": "Sn8888Sn"},
+  {"username": "romb4", "password": "LS6666LS"},
+  {"username": "king7", "password": "Lq7171Lq"},
+  {"username": "romb7", "password": "Gf8282Gf"},
+  {"username": "king5", "password": "Pr6868Pr"},
+  {"username": "romb9", "password": "Xh6767Xh"},
+  {"username": "shok3", "password": "Ph7676Ph"},
+  {"username": "romb5", "password": "Fj7474Fj"},
+  {"username": "king8", "password": "gI6565gI"},
+  {"username": "romb2", "password": "fS7373fS"},
+  {"username": "king3", "password": "Yu8787Yu"},
 ]
 
 
@@ -79,81 +103,45 @@ def save_tokens_to_file():
         traceback.print_exc()
 
 # ================== 4. PLAYWRIGHT LOGIN ==================
-def login_crm_playwright(username: str, password: str, p, show_browser: bool = False):
+def login_crm_playwright(username: str, password: str, p, show_browser: bool = False) -> Optional[Dict]:
     browser = None
     try:
-        print("=== DIAG LOGIN START ===")
-
+        print(f"[PLW] 🔵 Вход под {username}...")
         browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-blink-features=AutomationControlled",
-            ],
+            headless=not show_browser,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
             timeout=60000
         )
-
-        context = browser.new_context(
-            user_agent=random.choice(USER_AGENTS),
-            viewport={"width": 1280, "height": 800},
-            locale="ru-RU",
-            timezone_id="Asia/Almaty",
-        )
-
-        page = context.new_page()
-
-        # Убираем webdriver-флаг
-        page.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        """)
-
-        print("[DIAG] GOTO:", LOGIN_PAGE)
-        page.goto(LOGIN_PAGE, timeout=30000)
-        page.wait_for_timeout(4000)
-
-        print("[DIAG] FINAL URL:", page.url)
-
-        try:
-            title = page.title()
-        except Exception as e:
-            title = f"ERROR: {e}"
-        print("[DIAG] TITLE:", title)
-
-        html = page.content()
-        print("[DIAG] HTML LEN:", len(html))
-
-        head = html[:800].replace("\n", " ").replace("\r", " ")
-        print("[DIAG] HTML HEAD:", head)
-
-        print("[DIAG] HAS <input>:", "<input" in html)
-        print("[DIAG] HAS ЛОГИН:", "Логин" in html)
-        print("[DIAG] HAS PASSWORD:", "Пароль" in html)
-
-        # Признаки Cloudflare challenge
-        print("[DIAG] HAS cf-:", "cf-" in html.lower())
-        print("[DIAG] HAS cloudflare:", "cloudflare" in html.lower())
-        print("[DIAG] HAS challenge:", "challenge" in html.lower())
+        context = browser.new_context(user_agent=random.choice(USER_AGENTS))
+        page: Page = context.new_page()
+        page.goto(LOGIN_PAGE, wait_until="load", timeout=30000)
+        page.fill(LOGIN_SELECTOR, username)
+        time.sleep(0.4)
+        page.fill(PASSWORD_SELECTOR, password)
+        time.sleep(0.4)
+        page.click(SIGN_IN_BUTTON_SELECTOR)
+        page.wait_for_timeout(2000)
 
         cookies = context.cookies()
-        print("[DIAG] COOKIES COUNT:", len(cookies))
-        print("[DIAG] COOKIE NAMES:", [c["name"] for c in cookies])
+        cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+        user_agent = page.evaluate("() => navigator.userAgent")
 
-        print("=== DIAG LOGIN END ===")
-
-        # НИЧЕГО НЕ ВОЗВРАЩАЕМ — это тест
+        if cookie_header:
+            token = {
+                "username": username,
+                "cookie_header": cookie_header,
+                "user_agent": user_agent,
+                "time": int(time.time())
+            }
+            print(f"[PLW] ✅ {username} авторизован.")
+            return token
         return None
-
     except Exception as e:
-        print("[DIAG ERROR]:", e)
+        print(f"[PLW ERROR] {username}: {e}")
         return None
-
     finally:
         if browser:
             browser.close()
-
 
 # ================== 5. ПУЛ ТОКЕНОВ ИНИЦИАЛИЗАЦИЯ ==================
 def init_token_pool_playwright(show_browser: bool = False):
