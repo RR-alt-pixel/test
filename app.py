@@ -3,7 +3,6 @@ import os
 import time
 import json
 import random
-import itertools
 import traceback
 from threading import Thread, Lock
 from typing import Optional, Dict, List
@@ -22,118 +21,61 @@ BASE_URL = "https://pena.rest"
 API_BASE = BASE_URL
 SECRET_TOKEN = "Refresh-Server-Key-2025-Oct-VK44"
 
-TOKENS_FILE = "tokens.json"
-TOKENS_LOCK = Lock()
+# VPS PLAYWRIGHT SERVER
+VPS_URL = "http://85.198.88.213:5001"
 
-# ================== 2. ПУЛ ТОКЕНОВ ==================
-token_pool: List[Dict] = []
-token_cycle = None
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-]
-
-def load_tokens_from_file() -> List[Dict]:
-    """Загрузка токенов из файла"""
-    global token_pool, token_cycle
-    try:
-        if os.path.exists(TOKENS_FILE):
-            with open(TOKENS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list) and len(data) > 0:
-                    token_pool = data
-                    token_cycle = itertools.cycle(token_pool)
-                    print(f"[TOKENS] ✅ Загружено {len(token_pool)} токенов из файла.")
-                    return token_pool
-                else:
-                    print("[TOKENS] ⚠️ Файл пустой или некорректный.")
-        else:
-            print(f"[TOKENS] ⚠️ Файл {TOKENS_FILE} не найден.")
-    except Exception as e:
-        print(f"[TOKENS ERROR] Ошибка загрузки: {e}")
-        traceback.print_exc()
-    
-    token_pool = []
-    token_cycle = None
-    return []
-
-def save_tokens_to_file():
-    """Сохранение токенов в файл"""
-    global token_pool
-    try:
-        with TOKENS_LOCK:
-            tmp = TOKENS_FILE + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(token_pool, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, TOKENS_FILE)
-            print(f"[TOKENS] 💾 Сохранено {len(token_pool)} токенов.")
-    except Exception as e:
-        print(f"[TOKENS ERROR] Ошибка сохранения: {e}")
-        traceback.print_exc()
-
-# ================== 3. TOKEN GETTER ==================
-def get_next_token() -> Optional[Dict]:
-    """Получить следующий токен из пула"""
-    global token_pool, token_cycle
-    
-    if not token_pool:
-        print("[POOL] ❌ Пул токенов пуст! Ожидаем загрузки с VPS.")
-        return None
-        
-    if token_cycle is None:
-        token_cycle = itertools.cycle(token_pool)
-    
-    try:
-        token = next(token_cycle)
-        print(f"[POOL] 🔁 Используется токен: {token.get('username', 'unknown')}")
-        return token
-    except StopIteration:
-        print("[POOL] ⚠️ StopIteration - перезапуск цикла")
-        token_cycle = itertools.cycle(token_pool)
-        token = next(token_cycle)
-        return token
-
-# ================== 4. CRM GET ==================
+# ================== 2. CRM GET ЧЕРЕЗ VPS ==================
 def crm_get(endpoint: str, params: dict = None):
-    """Выполнить GET запрос к CRM"""
-    token = get_next_token()
-    if not token:
-        return "❌ Нет доступных токенов CRM."
-    
-    headers = {
-        "Accept": "application/json, text/plain, */*",
-        "User-Agent": token.get("user_agent", random.choice(USER_AGENTS)),
-        "Cookie": token.get("cookie_header", "")
-    }
-
-    if "/by-address" in endpoint:
-        headers["Referer"] = f"{BASE_URL}/person-search"
-    else:
-        headers["Referer"] = f"{BASE_URL}/search"
-
-    url = endpoint if endpoint.startswith("http") else API_BASE + endpoint
-    
+    """Выполнить GET запрос через VPS Playwright"""
     try:
-        print(f"[CRM] 🌐 GET {url} | Токен: {token.get('username')}")
-        r = requests.get(url, headers=headers, params=params, timeout=20)
+        print(f"[CRM] 🌐 Запрос через VPS: {endpoint}")
         
-        # Проверка авторизации
-        if r.status_code in (401, 403):
-            print(f"[CRM] ⚠️ Токен {token.get('username')} истёк (HTTP {r.status_code})")
-            # Просто пропускаем этот токен, VPS обновит позже
-            return f"❌ Токен истёк. Попробуйте через несколько минут."
+        r = requests.post(
+            f"{VPS_URL}/api/crm-request",
+            headers={
+                "Authorization": f"Bearer {SECRET_TOKEN}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "endpoint": endpoint,
+                "params": params or {}
+            },
+            timeout=30
+        )
         
-        print(f"[CRM] ✅ Ответ: {r.status_code}")
-        return r
-        
+        if r.status_code == 200:
+            data = r.json()
+            
+            # Создаём фейковый response объект для совместимости
+            class FakeResponse:
+                def __init__(self, data, status_code):
+                    self._data = data
+                    self.status_code = status_code
+                    self.text = json.dumps(data)
+                
+                def json(self):
+                    return self._data
+            
+            return FakeResponse(data.get('result'), 200)
+        elif r.status_code == 503:
+            print(f"[CRM] ⚠️ VPS перезапускается")
+            return "⌛ Сервис перезапускается. Попробуйте через 30 секунд."
+        else:
+            print(f"[CRM] ❌ VPS error: {r.status_code}")
+            return f"❌ Ошибка VPS: {r.status_code}"
+            
+    except requests.exceptions.Timeout:
+        print(f"[CRM] ⏱️ Timeout")
+        return "⏱️ Превышено время ожидания. Попробуйте снова."
+    except requests.exceptions.ConnectionError:
+        print(f"[CRM] ❌ Нет соединения с VPS")
+        return "❌ Нет соединения с сервером. Попробуйте позже."
     except Exception as e:
         print(f"[CRM ERROR] {e}")
         traceback.print_exc()
-        return f"❌ Ошибка запроса: {e}"
+        return f"❌ Ошибка: {e}"
 
-# ================== 5. ОЧЕРЕДЬ CRM ==================
+# ================== 3. ОЧЕРЕДЬ CRM ==================
 crm_queue = Queue()
 RESULT_TIMEOUT = 45
 
@@ -144,7 +86,7 @@ def crm_worker():
             func, args, kwargs, result_box = crm_queue.get()
             res = func(*args, **kwargs)
             result_box["result"] = res
-            time.sleep(random.uniform(1.7, 2.5))  # Задержка между запросами
+            time.sleep(random.uniform(1.5, 2.0))
         except Exception as e:
             print(f"[WORKER ERROR] {e}")
             result_box["error"] = str(e)
@@ -169,7 +111,7 @@ def enqueue_crm_get(endpoint, params=None):
     
     return {"status": "ok", "result": result_box["result"]}
 
-# ================== 6. ALLOWED USERS ==================
+# ================== 4. ALLOWED USERS ==================
 LAST_FETCH_TIME = 0
 FETCH_INTERVAL = 3600
 
@@ -195,19 +137,18 @@ def periodic_fetch():
             fetch_allowed_users()
         time.sleep(FETCH_INTERVAL)
 
-# ================== 7. ПОИСК ==================
+# ================== 5. ПОИСК ==================
 def search_by_iin(iin: str):
     r = enqueue_crm_get("/api/v2/person-search/by-iin", params={"iin": iin})
     if r["status"] != "ok":
-        pos = r.get("queue_position", "?")
-        return f"⌛ Ваш запрос в очереди (позиция {pos})."
+        return "⌛ Ваш запрос в очереди."
     resp = r["result"]
     if isinstance(resp, str):
         return resp
     if resp.status_code == 404:
         return "⚠️ Ничего не найдено по ИИН."
     if resp.status_code != 200:
-        return f"❌ Ошибка {resp.status_code}: {resp.text}"
+        return f"❌ Ошибка {resp.status_code}"
     p = resp.json()
     return (
         f"👤 <b>{p.get('snf','')}</b>\n"
@@ -224,15 +165,14 @@ def search_by_phone(phone: str):
         clean = "7" + clean[1:]
     r = enqueue_crm_get("/api/v2/person-search/by-phone", params={"phone": clean})
     if r["status"] != "ok":
-        pos = r.get("queue_position", "?")
-        return f"⌛ Ваш запрос в очереди (позиция {pos})."
+        return "⌛ Ваш запрос в очереди."
     resp = r["result"]
     if isinstance(resp, str):
         return resp
     if resp.status_code == 404:
         return f"⚠️ Ничего не найдено по номеру {phone}"
     if resp.status_code != 200:
-        return f"❌ Ошибка {resp.status_code}: {resp.text}"
+        return f"❌ Ошибка {resp.status_code}"
     data = resp.json()
     if not data:
         return f"⚠️ Ничего не найдено по номеру {phone}"
@@ -264,15 +204,14 @@ def search_by_fio(text: str):
         q = {**params, "smart_mode": "false", "limit": 10}
     r = enqueue_crm_get("/api/v2/person-search/smart", params=q)
     if r["status"] != "ok":
-        pos = r.get("queue_position", "?")
-        return f"⌛ Ваш запрос в очереди (позиция {pos})."
+        return "⌛ Ваш запрос в очереди."
     resp = r["result"]
     if isinstance(resp, str):
         return resp
     if resp.status_code == 404:
         return "⚠️ Ничего не найдено."
     if resp.status_code != 200:
-        return f"❌ Ошибка {resp.status_code}: {resp.text}"
+        return f"❌ Ошибка {resp.status_code}"
     data = resp.json()
     if not data:
         return "⚠️ Ничего не найдено."
@@ -307,12 +246,12 @@ def search_by_address(address: str):
         results.append(f"{i}. {p.get('snf','')} — {p.get('address','')}")
     return "\n".join(results)
 
-# ================== 8. FLASK + СЕССИИ ==================
+# ================== 6. FLASK + СЕССИИ ==================
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 active_sessions: Dict[int, Dict[str, float]] = {}
-SESSION_TTL = 3600  # 1 час
+SESSION_TTL = 3600
 
 @app.route('/api/session/start', methods=['POST'])
 def start_session():
@@ -326,17 +265,14 @@ def start_session():
     now = time.time()
     existing = active_sessions.get(user_id)
 
-    # Проверка активной сессии
     if existing and (now - existing["created"]) < SESSION_TTL:
-        print(f"[SESSION] ❌ Попытка перезапуска сессии {user_id}, отклонено.")
+        print(f"[SESSION] ❌ Попытка перезапуска сессии {user_id}")
         return jsonify({"error": "Сессия уже активна. Повторите позже."}), 403
 
-    # Удаление истёкшей сессии
     if existing and (now - existing["created"]) >= SESSION_TTL:
         del active_sessions[user_id]
         print(f"[SESSION] ⏰ Истекшая сессия {user_id} удалена")
 
-    # Создание новой сессии
     session_token = f"{user_id}-{int(now)}-{random.randint(1000,9999)}"
     active_sessions[user_id] = {
         "token": session_token,
@@ -359,12 +295,12 @@ def validate_session():
 
         if session["token"] != token:
             print(f"[SESSION] ⚠️ Несовпадение токена: uid={uid}")
-            return jsonify({"error": "Сессия недействительна. Вход возможен только с одного устройства."}), 403
+            return jsonify({"error": "Сессия недействительна."}), 403
 
         if time.time() - session["created"] > SESSION_TTL:
             del active_sessions[uid]
-            print(f"[SESSION] ⏰ Истёк срок действия сессии {uid}")
-            return jsonify({"error": "Сессия истекла. Авторизуйтесь заново."}), 403
+            print(f"[SESSION] ⏰ Истёк срок сессии {uid}")
+            return jsonify({"error": "Сессия истекла."}), 403
 
 @app.route('/api/search', methods=['POST'])
 def api_search():
@@ -402,93 +338,35 @@ def refresh_users():
     fetch_allowed_users()
     return jsonify({"ok": True, "count": len(ALLOWED_USER_IDS)})
 
-# ====== ЭНДПОИНТ: ПРИЁМ ТОКЕНОВ С VPS ======
-@app.route('/api/admin/upload-tokens', methods=['POST'])
-def upload_tokens():
-    """Принять токены с VPS и сохранить"""
-    auth_header = request.headers.get('Authorization')
-    if auth_header != f"Bearer {SECRET_TOKEN}":
-        print("[UPLOAD] ❌ Неверный токен авторизации")
-        return jsonify({"error": "Forbidden"}), 403
-
-    data = request.json
-
-    if not isinstance(data, list) or not data:
-        print("[UPLOAD] ❌ Некорректные данные")
-        return jsonify({"error": "Expected non-empty list of tokens"}), 400
-
-    # Валидация токенов
-    for t in data:
-        if not isinstance(t, dict):
-            return jsonify({"error": "Each token must be an object"}), 400
-        if not t.get("username") or not t.get("cookie_header") or not t.get("user_agent"):
-            print(f"[UPLOAD] ❌ Некорректный токен: {t}")
-            return jsonify({"error": "Token missing fields: username/cookie_header/user_agent"}), 400
-
+@app.route('/api/vps-status', methods=['GET'])
+def vps_status():
+    """Проверить статус VPS"""
     try:
-        # Сохранение в файл
-        tmp = TOKENS_FILE + ".tmp"
-        with TOKENS_LOCK:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, TOKENS_FILE)
+        r = requests.get(f"{VPS_URL}/health", timeout=5)
+        return jsonify(r.json())
+    except:
+        return jsonify({"error": "VPS недоступен"}), 503
 
-        # Обновление глобального пула
-        global token_pool, token_cycle
-        token_pool = data
-        token_cycle = itertools.cycle(token_pool) if token_pool else None
-
-        print(f"[UPLOAD] ✅ Получено и загружено {len(token_pool)} токенов")
-        return jsonify({"ok": True, "count": len(token_pool)})
-        
-    except Exception as e:
-        print(f"[UPLOAD ERROR] {e}")
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-# ====== ЭНДПОИНТ: ПРОВЕРКА СТАТУСА ТОКЕНОВ ======
-@app.route('/api/admin/tokens-status', methods=['GET'])
-def tokens_status():
-    """Проверить наличие токенов"""
-    auth_header = request.headers.get('Authorization')
-    if auth_header != f"Bearer {SECRET_TOKEN}":
-        return jsonify({"error": "Forbidden"}), 403
-    
-    return jsonify({
-        "tokens_count": len(token_pool),
-        "tokens": [{"username": t.get("username"), "has_cookie": bool(t.get("cookie_header"))} for t in token_pool]
-    })
-
-# ================== 9. ЗАПУСК ==================
+# ================== 7. ЗАПУСК ==================
 print("=" * 60)
-print("🚀 Запуск Render API сервера")
+print("🚀 Запуск Render API Gateway")
 print("=" * 60)
 
-# Загрузка разрешённых пользователей
 fetch_allowed_users()
 Thread(target=periodic_fetch, daemon=True).start()
 
-# ЗАГРУЗКА ТОКЕНОВ ПРИ СТАРТЕ
-print("[INIT] Загрузка токенов из файла...")
-load_tokens_from_file()
-
-if not token_pool:
-    print("[INIT] ⚠️ Токены не найдены. Ожидаем загрузки с VPS.")
-else:
-    print(f"[INIT] ✅ Готов к работе с {len(token_pool)} токенами")
-
-# Очистка истёкших сессий
 def cleanup_sessions():
     while True:
         now = time.time()
         expired = [uid for uid, s in active_sessions.items() if now - s["created"] > SESSION_TTL]
         for uid in expired:
             del active_sessions[uid]
-            print(f"[SESSION] 🧹 Удалена просроченная сессия {uid}")
+            print(f"[SESSION] 🧹 Удалена сессия {uid}")
         time.sleep(300)
 
 Thread(target=cleanup_sessions, daemon=True).start()
 
+print(f"VPS URL: {VPS_URL}")
 print("=" * 60)
 
 if __name__ == "__main__":
