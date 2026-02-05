@@ -25,24 +25,19 @@ LOGIN_PAGE = f"{BASE_URL}/auth/login"
 API_BASE = BASE_URL
 SECRET_TOKEN = "Refresh-Server-Key-2025-Oct-VK44"
 
+# важно: эта страница должна совпадать с тем, откуда в браузере реально уходит запрос поиска
+SEARCH_PAGE = f"{BASE_URL}/dashboard/search"
+
 LOGIN_SELECTOR = 'input[placeholder="Логин"]'
 PASSWORD_SELECTOR = 'input[placeholder="Пароль"]'
 SIGN_IN_BUTTON_SELECTOR = 'button[type="submit"]'
 
-TOKENS_FILE = "tokens.json"   # сохраняем только сериализуемые метаданные
+TOKENS_FILE = "tokens.json"
 TOKENS_LOCK = Lock()
-
-# ВАЖНО: для fingerprint нужно "прогреть" сессию страницей поиска
-WARMUP_URLS = [
-    f"{BASE_URL}/dashboard/search",
-    f"{BASE_URL}/dashboard",
-    f"{BASE_URL}/search",
-]
 
 # ================== 2. АККАУНТЫ ==================
 accounts = [
     {"username": "from1", "password": "2255NNbb"},
-    {"username": "from2", "password": "2244NNrr"},
 ]
 
 USER_AGENTS = [
@@ -91,20 +86,16 @@ def _save_tokens_meta(meta: List[Dict]):
 
 # ================== 5. PLAYWRIGHT WORKER (ЕДИНСТВЕННЫЙ ПОТОК) ==================
 pw_queue = Queue()
-PW_RESULT_TIMEOUT = 45
+PW_RESULT_TIMEOUT = 60
 
 def _build_url(endpoint: str, params: dict = None) -> str:
     if endpoint.startswith("http"):
         url = endpoint
     else:
         url = API_BASE + endpoint
-
     if params:
         qs = urlencode(params, doseq=True)
-        if "?" in url:
-            url = url + "&" + qs
-        else:
-            url = url + "?" + qs
+        url = url + ("&" if "?" in url else "?") + qs
     return url
 
 def _pw_worker_loop():
@@ -124,18 +115,20 @@ def _pw_worker_loop():
             })
         _save_tokens_meta(meta)
 
-    def _warmup(page: Page):
-        # прогрев страницы, чтобы поднялся fingerprint
-        for u in WARMUP_URLS:
-            try:
-                page.goto(u, wait_until="networkidle", timeout=30000)
-                page.wait_for_timeout(700)
-                print(f"[PLW] 🧩 warmup ok: {u}")
+    def _warmup(sess: Dict):
+        # критично: прогреть именно страницу, откуда уходит запрос (включает JS/fingerprint)
+        try:
+            if sess.get("warmed"):
                 return
-            except Exception:
-                continue
-        # если все варианты не прошли — не падаем, но логируем
-        print("[PLW] ⚠️ warmup failed (all urls).")
+            page: Page = sess["page"]
+            page.goto(SEARCH_PAGE, wait_until="networkidle", timeout=45000)
+            page.wait_for_timeout(700)
+            sess["warmed"] = True
+            print(f"[PW] 🔥 warmed: {sess.get('username')}")
+        except Exception as e:
+            # не фейлим сессию, но отметим, чтобы повторить позже
+            sess["warmed"] = False
+            print(f"[PW] warmup error {sess.get('username')}: {e}")
 
     def _login_one(pw_obj, username: str, password: str, show_browser: bool = False) -> Optional[Dict]:
         browser = None
@@ -146,11 +139,12 @@ def _pw_worker_loop():
                 args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
                 timeout=60000
             )
+
             ua = random.choice(USER_AGENTS)
             context = browser.new_context(user_agent=ua)
             page: Page = context.new_page()
 
-            page.goto(LOGIN_PAGE, wait_until="load", timeout=30000)
+            page.goto(LOGIN_PAGE, wait_until="load", timeout=45000)
             page.fill(LOGIN_SELECTOR, username)
             time.sleep(0.4)
             page.fill(PASSWORD_SELECTOR, password)
@@ -158,8 +152,12 @@ def _pw_worker_loop():
             page.click(SIGN_IN_BUTTON_SELECTOR)
             page.wait_for_timeout(2000)
 
-            # ВАЖНО: прогрев после логина
-            _warmup(page)
+            # обязательно прогреваем страницу поиска (device fingerprint часто включается тут)
+            try:
+                page.goto(SEARCH_PAGE, wait_until="networkidle", timeout=45000)
+                page.wait_for_timeout(700)
+            except Exception:
+                pass
 
             cookies = context.cookies()
             cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
@@ -176,7 +174,8 @@ def _pw_worker_loop():
                     "cookie_header": cookie_header,
                     "csrf_token": csrf,
                     "user_agent": user_agent or ua,
-                    "time": int(time.time())
+                    "time": int(time.time()),
+                    "warmed": True,
                 }
                 print(f"[PLW] ✅ {username} авторизован.")
                 return sess
@@ -199,13 +198,14 @@ def _pw_worker_loop():
 
     def _init_sessions(show_browser: bool = False):
         nonlocal pw, sessions, cycle
-        load_tokens_from_file()  # файл оставляем, но живые сессии поднимаем всегда
+        load_tokens_from_file()
 
         if pw is None:
             pw = sync_playwright().start()
             print("[PW] ✅ Playwright started")
 
         print("[POOL] 🔄 Логин через Playwright (живые сессии)...")
+
         for s in sessions:
             try:
                 s["browser"].close()
@@ -237,13 +237,15 @@ def _pw_worker_loop():
             cycle = itertools.cycle(sessions)
         try:
             s = next(cycle)
-            print(f"[POOL] 🔁 Используется сессия {s['username']}")
-            return s
         except StopIteration:
             cycle = itertools.cycle(sessions)
             s = next(cycle)
-            print(f"[POOL] ♻️ Перезапуск цикла, выбран {s['username']}")
-            return s
+
+        print(f"[POOL] 🔁 Используется сессия {s['username']}")
+        # если вдруг прогрев сбросился — прогреем перед запросом
+        if not s.get("warmed"):
+            _warmup(s)
+        return s
 
     def _refresh_session(username: str) -> Optional[Dict]:
         nonlocal pw, sessions, cycle
@@ -286,19 +288,13 @@ def _pw_worker_loop():
 
     def _fetch_in_page(url: str, sess: Dict) -> Dict:
         page: Page = sess["page"]
-        csrf = sess.get("csrf_token", "") or ""
-        # fetch делаем в браузере, с credentials + headers (если надо)
-        js = """
-        async ({ url, csrf }) => {
+        csrf = sess.get("csrf_token") or ""
+
+        # Важно: сначала пробуем максимально "нативный" fetch (чтобы сайт мог навесить fingerprint сам).
+        js_native = """
+        async (url) => {
           try {
-            const r = await fetch(url, {
-              method: "GET",
-              credentials: "include",
-              headers: {
-                "x-csrf-token": csrf,
-                "x-requested-with": "XMLHttpRequest"
-              }
-            });
+            const r = await fetch(url, { method: "GET", credentials: "include" });
             const txt = await r.text();
             let jsn = null;
             try { jsn = JSON.parse(txt); } catch (e) {}
@@ -308,7 +304,44 @@ def _pw_worker_loop():
           }
         }
         """
-        return page.evaluate(js, {"url": url, "csrf": csrf})
+
+        out = page.evaluate(js_native, url)
+        status = int(out.get("status", 0) or 0)
+
+        # если защита ждёт заголовки как в Network — даём второй заход с referer/origin/csrf
+        if status in (401, 403) and csrf:
+            js_headers = """
+            async (payload) => {
+              try {
+                const r = await fetch(payload.url, {
+                  method: "GET",
+                  credentials: "include",
+                  headers: payload.headers,
+                  referrer: payload.referrer,
+                  referrerPolicy: "strict-origin-when-cross-origin"
+                });
+                const txt = await r.text();
+                let jsn = null;
+                try { jsn = JSON.parse(txt); } catch (e) {}
+                return { ok: r.ok, status: r.status, text: txt, json: jsn, retry: true };
+              } catch (e) {
+                return { ok: false, status: 0, text: String(e), json: null, error: String(e), retry: true };
+              }
+            }
+            """
+            payload = {
+                "url": url,
+                "referrer": SEARCH_PAGE,
+                "headers": {
+                    "accept": "application/json, text/plain, */*",
+                    "x-csrf-token": csrf,
+                    "x-requested-with": "XMLHttpRequest",
+                }
+            }
+            out2 = page.evaluate(js_headers, payload)
+            return out2
+
+        return out
 
     while True:
         task = pw_queue.get()
@@ -331,24 +364,31 @@ def _pw_worker_loop():
                 if not sess:
                     result_box["error"] = "no_sessions"
                 else:
+                    # перед каждым fetch убеждаемся, что мы на SEARCH_PAGE (как в браузере)
+                    try:
+                        if sess["page"].url and sess["page"].url.startswith(BASE_URL):
+                            pass
+                        else:
+                            sess["page"].goto(SEARCH_PAGE, wait_until="networkidle", timeout=45000)
+                            sess["page"].wait_for_timeout(300)
+                            sess["warmed"] = True
+                    except Exception:
+                        pass
+
                     out = _fetch_in_page(url, sess)
                     status = int(out.get("status", 0) or 0)
 
-                    # если device fingerprint требует — иногда помогает повторный warmup
-                    if status in (401, 403):
-                        try:
-                            _warmup(sess["page"])
-                        except Exception:
-                            pass
-
-                    # 401/403 -> refresh -> retry 1 раз
+                    # 401/403 -> refresh -> прогрев -> retry 1 раз
                     if status in (401, 403):
                         uname = sess["username"]
                         print(f"[AUTH] {uname} → 401/403 → обновляем сессию")
                         new_s = _refresh_session(uname)
                         if new_s:
+                            try:
+                                _warmup(new_s)
+                            except Exception:
+                                pass
                             out = _fetch_in_page(url, new_s)
-                            status = int(out.get("status", 0) or 0)
 
                     result_box["data"] = out
 
@@ -382,7 +422,7 @@ def _pw_call(kind: str, payload: dict, timeout: int = PW_RESULT_TIMEOUT) -> Dict
 # ================== 6. ВНЕШНЯЯ АРХИТЕКТУРА (crm_get + crm_queue остаются) ==================
 def init_token_pool_playwright(show_browser: bool = False):
     print("[POOL] init requested...")
-    r = _pw_call("init", {"show_browser": show_browser}, timeout=90)
+    r = _pw_call("init", {"show_browser": show_browser}, timeout=120)
     if r["status"] != "ok":
         print("[POOL] ❌ init timeout")
     else:
@@ -407,7 +447,7 @@ def crm_get(endpoint: str, params: dict = None):
     jsn = out.get("json", None)
     return ResponseLike(status_code=status, text=txt, json_data=jsn)
 
-# ================== 8. ОЧЕРЕДЬ CRM (ОСТАВЛЯЕМ КАК У ТЕБЯ) ==================
+# ================== 8. ОЧЕРЕДЬ CRM (как у тебя) ==================
 crm_queue = Queue()
 RESULT_TIMEOUT = 45
 
@@ -492,7 +532,7 @@ def search_by_iin(iin: str):
     )
 
 def search_by_phone(phone: str):
-    clean = ''.join(filter(str.isdigit, phone))
+    clean = "".join(filter(str.isdigit, phone))
     if clean.startswith("8"):
         clean = "7" + clean[1:]
 
@@ -578,12 +618,12 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 active_sessions: Dict[int, Dict[str, float]] = {}
-SESSION_TTL = 3600  # 1 час
+SESSION_TTL = 3600
 
-@app.route('/api/session/start', methods=['POST'])
+@app.route("/api/session/start", methods=["POST"])
 def start_session():
     data = request.json
-    user_id = data.get('telegram_user_id')
+    user_id = data.get("telegram_user_id")
     if not user_id:
         return jsonify({"error": "Нет Telegram ID"}), 400
     if int(user_id) not in ALLOWED_USER_IDS:
@@ -601,10 +641,7 @@ def start_session():
         print(f"[SESSION] ⏰ Истекшая сессия {user_id} удалена")
 
     session_token = f"{user_id}-{int(now)}-{random.randint(1000,9999)}"
-    active_sessions[user_id] = {
-        "token": session_token,
-        "created": now
-    }
+    active_sessions[user_id] = {"token": session_token, "created": now}
 
     print(f"[SESSION] 🔑 Активирована новая сессия для {user_id}")
     return jsonify({"session_token": session_token})
@@ -629,16 +666,16 @@ def validate_session():
             print(f"[SESSION] ⏰ Истек срок действия сессии {uid}")
             return jsonify({"error": "Сессия истекла. Авторизуйтесь заново."}), 403
 
-@app.route('/api/search', methods=['POST'])
+@app.route("/api/search", methods=["POST"])
 def api_search():
     data = request.json
-    user_id = data.get('telegram_user_id')
+    user_id = data.get("telegram_user_id")
     if user_id is None:
         return jsonify({"error": "Ошибка авторизации."}), 403
     if int(user_id) not in ALLOWED_USER_IDS:
         return jsonify({"error": "Нет доступа."}), 403
 
-    query = data.get('query', '').strip()
+    query = (data.get("query") or "").strip()
     if not query:
         return jsonify({"error": "Пустой запрос"}), 400
 
@@ -653,13 +690,13 @@ def api_search():
 
     return jsonify({"result": reply})
 
-@app.route('/api/queue-size', methods=['GET'])
+@app.route("/api/queue-size", methods=["GET"])
 def queue_size():
     return jsonify({"queue_size": crm_queue.qsize()})
 
-@app.route('/api/refresh-users', methods=['POST'])
+@app.route("/api/refresh-users", methods=["POST"])
 def refresh_users():
-    auth_header = request.headers.get('Authorization')
+    auth_header = request.headers.get("Authorization")
     if auth_header != f"Bearer {SECRET_TOKEN}":
         return jsonify({"error": "Forbidden"}), 403
     fetch_allowed_users()
@@ -670,7 +707,7 @@ print("🚀 Запуск API с очередью запросов...")
 fetch_allowed_users()
 Thread(target=periodic_fetch, daemon=True).start()
 
-# init делаем через Playwright worker (один поток)
+# init через воркер
 Thread(target=init_token_pool_playwright, daemon=True).start()
 
 def cleanup_sessions():
