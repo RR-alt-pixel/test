@@ -32,107 +32,144 @@ accounts = [
     {"username": "from2", "password": "2244NNrr"},
 ]
 
-# ================== 3. ПУЛ БРАУЗЕРОВ ==================
+# ================== 3. ПУЛ БРАУЗЕРОВ С ВЫДЕЛЕННЫМ ПОТОКОМ ==================
 class BrowserPool:
     def __init__(self):
         self.browsers: List[Dict] = []
-        self.lock = Lock()
         self.playwright = None
         self.current_index = 0
+        self.lock = Lock()
+        
+        # Очередь для запросов к Playwright
+        self.request_queue = Queue()
+        self.playwright_thread = None
         
     def init(self):
-        """Инициализация браузеров"""
+        """Инициализация браузеров в отдельном потоке"""
         print("\n" + "="*60)
         print("🌐 Инициализация пула браузеров...")
         print("="*60)
         
-        self.playwright = sync_playwright().start()
+        # Запускаем Playwright в отдельном потоке
+        self.playwright_thread = Thread(target=self._playwright_worker, daemon=True)
+        self.playwright_thread.start()
         
-        for acc in accounts:
-            try:
-                print(f"\n[BROWSER] Запуск для {acc['username']}...")
-                
-                browser = self.playwright.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu",
-                        "--disable-blink-features=AutomationControlled",
-                    ],
-                )
-                
-                context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-                    viewport={"width": 1280, "height": 800},
-                    locale="ru-RU",
-                    timezone_id="Asia/Almaty",
-                )
-                
-                page = context.new_page()
-                page.add_init_script("""
-                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                    Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3]});
-                """)
-                
-                # Логин
-                print(f"[BROWSER] Логин {acc['username']}...")
-                page.goto(LOGIN_PAGE, timeout=30000)
-                page.wait_for_timeout(2000)
-                page.fill(LOGIN_SELECTOR, acc['username'])
-                page.wait_for_timeout(400)
-                page.fill(PASSWORD_SELECTOR, acc['password'])
-                page.wait_for_timeout(400)
-                page.click(SIGN_IN_BUTTON_SELECTOR)
-                page.wait_for_timeout(3000)
-                
-                # Проверяем что залогинились
-                try:
-                    page.wait_for_url("**/dashboard", timeout=10000)
-                    print(f"[BROWSER] ✅ {acc['username']} авторизован")
-                except:
-                    print(f"[BROWSER] ⚠️ {acc['username']} - возможно не перешёл на dashboard")
-                
-                self.browsers.append({
-                    "username": acc['username'],
-                    "browser": browser,
-                    "context": context,
-                    "page": page,
-                    "last_used": time.time(),
-                    "request_count": 0
-                })
-                
-            except Exception as e:
-                print(f"[BROWSER] ❌ Ошибка для {acc['username']}: {e}")
-                traceback.print_exc()
+        # Ждём инициализации
+        time.sleep(5)
         
-        print(f"\n[POOL] ✅ Инициализировано {len(self.browsers)} браузеров")
+        print(f"\n[POOL] ✅ Playwright поток запущен")
         print("="*60 + "\n")
     
-    def get_next_page(self) -> Optional[Dict]:
-        """Получить следующий браузер по кругу"""
-        with self.lock:
-            if not self.browsers:
-                return None
+    def _playwright_worker(self):
+        """Воркер в отдельном потоке для Playwright"""
+        try:
+            self.playwright = sync_playwright().start()
             
-            browser_data = self.browsers[self.current_index]
-            self.current_index = (self.current_index + 1) % len(self.browsers)
-            browser_data['last_used'] = time.time()
-            browser_data['request_count'] += 1
+            # Инициализация браузеров
+            for acc in accounts:
+                try:
+                    print(f"[BROWSER] Запуск для {acc['username']}...")
+                    
+                    browser = self.playwright.chromium.launch(
+                        headless=True,
+                        args=[
+                            "--no-sandbox",
+                            "--disable-setuid-sandbox",
+                            "--disable-dev-shm-usage",
+                            "--disable-gpu",
+                            "--disable-blink-features=AutomationControlled",
+                        ],
+                    )
+                    
+                    context = browser.new_context(
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                        viewport={"width": 1280, "height": 800},
+                        locale="ru-RU",
+                        timezone_id="Asia/Almaty",
+                    )
+                    
+                    page = context.new_page()
+                    page.add_init_script("""
+                        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3]});
+                    """)
+                    
+                    # Логин
+                    print(f"[BROWSER] Логин {acc['username']}...")
+                    page.goto(LOGIN_PAGE, timeout=30000)
+                    page.wait_for_timeout(2000)
+                    page.fill(LOGIN_SELECTOR, acc['username'])
+                    page.wait_for_timeout(400)
+                    page.fill(PASSWORD_SELECTOR, acc['password'])
+                    page.wait_for_timeout(400)
+                    page.click(SIGN_IN_BUTTON_SELECTOR)
+                    page.wait_for_timeout(3000)
+                    
+                    try:
+                        page.wait_for_url("**/dashboard", timeout=10000)
+                        print(f"[BROWSER] ✅ {acc['username']} авторизован")
+                    except:
+                        print(f"[BROWSER] ⚠️ {acc['username']} - возможно не перешёл на dashboard")
+                    
+                    self.browsers.append({
+                        "username": acc['username'],
+                        "account": acc,
+                        "browser": browser,
+                        "context": context,
+                        "page": page,
+                        "last_used": time.time(),
+                        "request_count": 0
+                    })
+                    
+                except Exception as e:
+                    print(f"[BROWSER] ❌ Ошибка для {acc['username']}: {e}")
+                    traceback.print_exc()
             
-            return browser_data
+            print(f"[POOL] ✅ Инициализировано {len(self.browsers)} браузеров")
+            
+            # Теперь обрабатываем запросы из очереди
+            while True:
+                try:
+                    task = self.request_queue.get()
+                    
+                    if task["type"] == "request":
+                        self._handle_request(task)
+                    elif task["type"] == "reauth":
+                        self._handle_reauth(task)
+                    elif task["type"] == "shutdown":
+                        break
+                        
+                except Exception as e:
+                    print(f"[PLAYWRIGHT WORKER] ❌ Ошибка: {e}")
+                    traceback.print_exc()
+                    
+        except Exception as e:
+            print(f"[PLAYWRIGHT WORKER] ❌ Критическая ошибка: {e}")
+            traceback.print_exc()
+        finally:
+            self._cleanup()
     
-    def request(self, endpoint: str, params: dict = None):
-        """Выполнить запрос через браузер"""
-        browser_data = self.get_next_page()
-        if not browser_data:
-            return "❌ Нет доступных браузеров."
-        
-        page: Page = browser_data['page']
-        username = browser_data['username']
+    def _handle_request(self, task):
+        """Обработать запрос в потоке Playwright"""
+        endpoint = task["endpoint"]
+        params = task["params"]
+        result_box = task["result_box"]
         
         try:
+            # Получаем следующий браузер
+            with self.lock:
+                if not self.browsers:
+                    result_box["error"] = "❌ Нет доступных браузеров."
+                    return
+                
+                browser_data = self.browsers[self.current_index]
+                self.current_index = (self.current_index + 1) % len(self.browsers)
+                browser_data['last_used'] = time.time()
+                browser_data['request_count'] += 1
+            
+            page: Page = browser_data['page']
+            username = browser_data['username']
+            
             print(f"[REQUEST] {endpoint} | Browser: {username} | Count: {browser_data['request_count']}")
             
             # Устанавливаем Referer
@@ -141,7 +178,7 @@ class BrowserPool:
             else:
                 referer = f"{BASE_URL}/search"
             
-            # Делаем запрос через Playwright API
+            # Делаем запрос
             url = endpoint if endpoint.startswith("http") else BASE_URL + endpoint
             
             response = page.request.get(
@@ -155,40 +192,31 @@ class BrowserPool:
             
             if status == 200:
                 print(f"[REQUEST] ✅ Успешно")
-                return response
+                result_box["response"] = response
             elif status == 401:
-                print(f"[REQUEST] ⚠️ 401 - нужен повторный логин для {username}")
-                # Пробуем переавторизоваться
-                self._reauth_browser(browser_data)
+                print(f"[REQUEST] ⚠️ 401 - переавторизация {username}")
+                # Переавторизуемся
+                self._reauth_browser_sync(browser_data)
                 # Повторяем запрос
                 response = page.request.get(url, params=params, headers={"Referer": referer})
-                return response
-            elif status == 404:
-                print(f"[REQUEST] ⚠️ 404 - не найдено")
-                return response
+                result_box["response"] = response
             else:
-                print(f"[REQUEST] ⚠️ Неожиданный статус: {status}")
-                return response
+                result_box["response"] = response
                 
         except Exception as e:
             print(f"[REQUEST] ❌ Error: {e}")
             traceback.print_exc()
-            return f"❌ Ошибка запроса: {e}"
+            result_box["error"] = f"❌ Ошибка запроса: {e}"
     
-    def _reauth_browser(self, browser_data: Dict):
-        """Переавторизация браузера"""
+    def _reauth_browser_sync(self, browser_data: Dict):
+        """Переавторизация браузера (синхронно в потоке Playwright)"""
         try:
             username = browser_data['username']
             page = browser_data['page']
-            
-            # Находим аккаунт
-            acc = next((a for a in accounts if a['username'] == username), None)
-            if not acc:
-                return
+            acc = browser_data['account']
             
             print(f"[REAUTH] Переавторизация {username}...")
             
-            # Переходим на страницу логина
             page.goto(LOGIN_PAGE, timeout=30000)
             page.wait_for_timeout(2000)
             page.fill(LOGIN_SELECTOR, acc['username'])
@@ -203,7 +231,12 @@ class BrowserPool:
         except Exception as e:
             print(f"[REAUTH] ❌ Ошибка: {e}")
     
-    def close_all(self):
+    def _handle_reauth(self, task):
+        """Обработать переавторизацию"""
+        # Можно добавить при необходимости
+        pass
+    
+    def _cleanup(self):
         """Закрыть все браузеры"""
         print("\n[POOL] Закрытие браузеров...")
         for b in self.browsers:
@@ -216,19 +249,51 @@ class BrowserPool:
         self.browsers = []
         print("[POOL] ✅ Все браузеры закрыты")
     
+    def request(self, endpoint: str, params: dict = None):
+        """Выполнить запрос через браузер (из любого потока)"""
+        result_box = {}
+        
+        # Добавляем задачу в очередь Playwright потока
+        self.request_queue.put({
+            "type": "request",
+            "endpoint": endpoint,
+            "params": params,
+            "result_box": result_box
+        })
+        
+        # Ждём результата
+        timeout = 30
+        start = time.time()
+        while "response" not in result_box and "error" not in result_box:
+            if time.time() - start > timeout:
+                return "⏱️ Превышено время ожидания"
+            time.sleep(0.1)
+        
+        if "error" in result_box:
+            return result_box["error"]
+        
+        return result_box["response"]
+    
     def get_stats(self):
         """Получить статистику браузеров"""
-        return {
-            "count": len(self.browsers),
-            "browsers": [
-                {
-                    "username": b['username'],
-                    "request_count": b['request_count'],
-                    "last_used": int(time.time() - b['last_used'])
-                }
-                for b in self.browsers
-            ]
-        }
+        with self.lock:
+            return {
+                "count": len(self.browsers),
+                "browsers": [
+                    {
+                        "username": b['username'],
+                        "request_count": b['request_count'],
+                        "last_used": int(time.time() - b['last_used'])
+                    }
+                    for b in self.browsers
+                ]
+            }
+    
+    def close_all(self):
+        """Закрыть все браузеры"""
+        self.request_queue.put({"type": "shutdown"})
+        if self.playwright_thread:
+            self.playwright_thread.join(timeout=5)
 
 # Глобальный пул
 browser_pool = BrowserPool()
@@ -309,7 +374,6 @@ def search_by_iin(iin: str):
     if isinstance(resp, str):
         return resp
     
-    # resp теперь это Playwright Response объект
     if resp.status == 404:
         return "⚠️ Ничего не найдено по ИИН."
     if resp.status != 200:
@@ -528,26 +592,6 @@ def browser_stats():
         return jsonify({"error": "Forbidden"}), 403
     return jsonify(browser_pool.get_stats())
 
-@app.route('/api/restart-browsers', methods=['POST'])
-def restart_browsers():
-    """Перезапустить браузеры"""
-    auth_header = request.headers.get('Authorization')
-    if auth_header != f"Bearer {SECRET_TOKEN}":
-        return jsonify({"error": "Forbidden"}), 403
-    
-    def restart_async():
-        try:
-            print("[RESTART] Перезапуск браузеров...")
-            browser_pool.close_all()
-            time.sleep(3)
-            browser_pool.init()
-            print("[RESTART] ✅ Готово")
-        except Exception as e:
-            print(f"[RESTART] ❌ Ошибка: {e}")
-    
-    Thread(target=restart_async, daemon=True).start()
-    return jsonify({"ok": True, "message": "Restarting..."})
-
 # ================== 9. ЗАПУСК ==================
 def init_and_run():
     """Инициализация и запуск"""
@@ -574,11 +618,12 @@ def init_and_run():
     
     Thread(target=cleanup_sessions, daemon=True).start()
     
-    # Keep-alive для браузеров
+    # Keep-alive
     def keep_alive():
         while True:
             time.sleep(300)
-            print(f"[KEEPALIVE] Браузеров: {len(browser_pool.browsers)}")
+            stats = browser_pool.get_stats()
+            print(f"[KEEPALIVE] Браузеров: {stats['count']}")
     
     Thread(target=keep_alive, daemon=True).start()
     
