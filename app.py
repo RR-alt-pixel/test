@@ -37,7 +37,6 @@ accounts = [
   {"username": "from2", "password": "2244NNrr"},
 ]
 
-
 # ================== 3. ПУЛ ТОКЕНОВ ==================
 token_pool: List[Dict] = []
 token_cycle = None
@@ -101,6 +100,7 @@ def login_crm_playwright(username: str, password: str, p, show_browser: bool = F
 
         cookies = context.cookies()
         cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+        csrf = next((c["value"] for c in cookies if c["name"] == "csrf_token"), "")
         user_agent = page.evaluate("() => navigator.userAgent")
 
         if cookie_header:
@@ -108,6 +108,7 @@ def login_crm_playwright(username: str, password: str, p, show_browser: bool = F
                 "username": username,
                 "cookie_header": cookie_header,
                 "user_agent": user_agent,
+                "csrf_token": csrf,
                 "time": int(time.time())
             }
             print(f"[PLW] ✅ {username} авторизован.")
@@ -194,13 +195,11 @@ def crm_get(endpoint: str, params: dict = None):
     headers = {
         "Accept": "application/json, text/plain, */*",
         "User-Agent": token.get("user_agent", random.choice(USER_AGENTS)),
-        "Cookie": token.get("cookie_header", "")
+        "Cookie": token.get("cookie_header", ""),
+        "X-CSRF-Token": token.get("csrf_token", ""),
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": f"{BASE_URL}/dashboard/search"
     }
-
-    if "/by-address" in endpoint:
-        headers["Referer"] = f"{BASE_URL}/person-search"
-    else:
-        headers["Referer"] = f"{BASE_URL}/search"
 
     url = endpoint if endpoint.startswith("http") else API_BASE + endpoint
     try:
@@ -211,10 +210,12 @@ def crm_get(endpoint: str, params: dict = None):
             new_t = refresh_token_for_username(uname)
             if new_t:
                 headers["Cookie"] = new_t["cookie_header"]
+                headers["X-CSRF-Token"] = new_t.get("csrf_token", "")
                 r = requests.get(url, headers=headers, params=params, timeout=20)
         return r
     except Exception as e:
         return f"❌ Ошибка CRM: {e}"
+
 # ================== 8. ОЧЕРЕДЬ CRM ==================
 crm_queue = Queue()
 RESULT_TIMEOUT = 45
@@ -271,7 +272,7 @@ def periodic_fetch():
 
 # ================== 10. ПОИСК ==================
 def search_by_iin(iin: str):
-    r = enqueue_crm_get("/api/v2/person-search/by-iin", params={"iin": iin})
+    r = enqueue_crm_get("/api/v3/search/iin", params={"iin": iin})
     if r["status"] != "ok":
         pos = r.get("queue_position", "?")
         return f"⌛ Ваш запрос в очереди (позиция {pos})."
@@ -282,7 +283,12 @@ def search_by_iin(iin: str):
         return "⚠️ Ничего не найдено по ИИН."
     if resp.status_code != 200:
         return f"❌ Ошибка {resp.status_code}: {resp.text}"
-    p = resp.json()
+
+    data = resp.json()
+    if not data:
+        return "⚠️ Ничего не найдено по ИИН."
+    p = data[0]
+
     return (
         f"👤 <b>{p.get('snf','')}</b>\n"
         f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
@@ -296,7 +302,7 @@ def search_by_phone(phone: str):
     clean = ''.join(filter(str.isdigit, phone))
     if clean.startswith("8"):
         clean = "7" + clean[1:]
-    r = enqueue_crm_get("/api/v2/person-search/by-phone", params={"phone": clean})
+    r = enqueue_crm_get("/api/v3/search/phone", params={"phone": clean, "limit": 100})
     if r["status"] != "ok":
         pos = r.get("queue_position", "?")
         return f"⌛ Ваш запрос в очереди (позиция {pos})."
@@ -307,10 +313,12 @@ def search_by_phone(phone: str):
         return f"⚠️ Ничего не найдено по номеру {phone}"
     if resp.status_code != 200:
         return f"❌ Ошибка {resp.status_code}: {resp.text}"
+
     data = resp.json()
     if not data:
         return f"⚠️ Ничего не найдено по номеру {phone}"
-    p = data[0] if isinstance(data, list) else data
+    p = data[0]
+
     return (
         f"👤 <b>{p.get('snf','')}</b>\n"
         f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
@@ -336,7 +344,8 @@ def search_by_fio(text: str):
         if len(parts) >= 3 and parts[2] != "":
             params["father_name"] = parts[2]
         q = {**params, "smart_mode": "false", "limit": 10}
-    r = enqueue_crm_get("/api/v2/person-search/smart", params=q)
+
+    r = enqueue_crm_get("/api/v3/search/fio", params=q)
     if r["status"] != "ok":
         pos = r.get("queue_position", "?")
         return f"⌛ Ваш запрос в очереди (позиция {pos})."
@@ -347,11 +356,11 @@ def search_by_fio(text: str):
         return "⚠️ Ничего не найдено."
     if resp.status_code != 200:
         return f"❌ Ошибка {resp.status_code}: {resp.text}"
+
     data = resp.json()
     if not data:
         return "⚠️ Ничего не найдено."
-    if isinstance(data, dict):
-        data = [data]
+
     results = []
     for i, p in enumerate(data[:10], start=1):
         results.append(
@@ -364,22 +373,8 @@ def search_by_fio(text: str):
     return "📌 Результаты поиска по ФИО:\n\n" + "\n".join(results)
 
 def search_by_address(address: str):
-    params = {"address": address, "exact_match": "false", "limit": 50}
-    r = enqueue_crm_get("/api/v2/person-search/by-address", params=params)
-    if r["status"] != "ok":
-        return "⌛ В очереди."
-    resp = r["result"]
-    if isinstance(resp, str):
-        return resp
-    if resp.status_code != 200:
-        return f"❌ Ошибка {resp.status_code}"
-    data = resp.json()
-    if isinstance(data, dict):
-        data = [data]
-    results = []
-    for i, p in enumerate(data[:10], start=1):
-        results.append(f"{i}. {p.get('snf','')} — {p.get('address','')}")
-    return "\n".join(results)
+    # В v3 эндпоинт для адреса ты не присылал. Чтобы ничего не ломать — явное сообщение.
+    return "⚠️ Поиск по адресу на pena.rest (v3) не настроен. Скинь запрос из Network — добавлю."
 
 # ================== 11. FLASK + СЕССИИ ==================
 app = Flask(__name__)
