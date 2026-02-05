@@ -32,10 +32,17 @@ SIGN_IN_BUTTON_SELECTOR = 'button[type="submit"]'
 TOKENS_FILE = "tokens.json"   # сохраняем только сериализуемые метаданные
 TOKENS_LOCK = Lock()
 
+# ВАЖНО: для fingerprint нужно "прогреть" сессию страницей поиска
+WARMUP_URLS = [
+    f"{BASE_URL}/dashboard/search",
+    f"{BASE_URL}/dashboard",
+    f"{BASE_URL}/search",
+]
+
 # ================== 2. АККАУНТЫ ==================
 accounts = [
-  {"username": "from1", "password": "2255NNbb"},
-  {"username": "from2", "password": "2244NNrr"},
+    {"username": "from1", "password": "2255NNbb"},
+    {"username": "from2", "password": "2244NNrr"},
 ]
 
 USER_AGENTS = [
@@ -117,6 +124,19 @@ def _pw_worker_loop():
             })
         _save_tokens_meta(meta)
 
+    def _warmup(page: Page):
+        # прогрев страницы, чтобы поднялся fingerprint
+        for u in WARMUP_URLS:
+            try:
+                page.goto(u, wait_until="networkidle", timeout=30000)
+                page.wait_for_timeout(700)
+                print(f"[PLW] 🧩 warmup ok: {u}")
+                return
+            except Exception:
+                continue
+        # если все варианты не прошли — не падаем, но логируем
+        print("[PLW] ⚠️ warmup failed (all urls).")
+
     def _login_one(pw_obj, username: str, password: str, show_browser: bool = False) -> Optional[Dict]:
         browser = None
         try:
@@ -137,6 +157,9 @@ def _pw_worker_loop():
             time.sleep(0.4)
             page.click(SIGN_IN_BUTTON_SELECTOR)
             page.wait_for_timeout(2000)
+
+            # ВАЖНО: прогрев после логина
+            _warmup(page)
 
             cookies = context.cookies()
             cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
@@ -176,14 +199,13 @@ def _pw_worker_loop():
 
     def _init_sessions(show_browser: bool = False):
         nonlocal pw, sessions, cycle
-        load_tokens_from_file()  # просто читаем, чтобы файл был актуален, но живые pages поднимаем всегда
+        load_tokens_from_file()  # файл оставляем, но живые сессии поднимаем всегда
 
         if pw is None:
             pw = sync_playwright().start()
             print("[PW] ✅ Playwright started")
 
         print("[POOL] 🔄 Логин через Playwright (живые сессии)...")
-        # закрываем старые, если были
         for s in sessions:
             try:
                 s["browser"].close()
@@ -264,10 +286,19 @@ def _pw_worker_loop():
 
     def _fetch_in_page(url: str, sess: Dict) -> Dict:
         page: Page = sess["page"]
+        csrf = sess.get("csrf_token", "") or ""
+        # fetch делаем в браузере, с credentials + headers (если надо)
         js = """
-        async (url) => {
+        async ({ url, csrf }) => {
           try {
-            const r = await fetch(url, { method: "GET", credentials: "include" });
+            const r = await fetch(url, {
+              method: "GET",
+              credentials: "include",
+              headers: {
+                "x-csrf-token": csrf,
+                "x-requested-with": "XMLHttpRequest"
+              }
+            });
             const txt = await r.text();
             let jsn = null;
             try { jsn = JSON.parse(txt); } catch (e) {}
@@ -277,9 +308,8 @@ def _pw_worker_loop():
           }
         }
         """
-        return page.evaluate(js, url)
+        return page.evaluate(js, {"url": url, "csrf": csrf})
 
-    # основной цикл воркера
     while True:
         task = pw_queue.get()
         try:
@@ -303,6 +333,13 @@ def _pw_worker_loop():
                 else:
                     out = _fetch_in_page(url, sess)
                     status = int(out.get("status", 0) or 0)
+
+                    # если device fingerprint требует — иногда помогает повторный warmup
+                    if status in (401, 403):
+                        try:
+                            _warmup(sess["page"])
+                        except Exception:
+                            pass
 
                     # 401/403 -> refresh -> retry 1 раз
                     if status in (401, 403):
@@ -344,7 +381,6 @@ def _pw_call(kind: str, payload: dict, timeout: int = PW_RESULT_TIMEOUT) -> Dict
 
 # ================== 6. ВНЕШНЯЯ АРХИТЕКТУРА (crm_get + crm_queue остаются) ==================
 def init_token_pool_playwright(show_browser: bool = False):
-    # ВАЖНО: теперь init делает Playwright worker (в одном потоке)
     print("[POOL] init requested...")
     r = _pw_call("init", {"show_browser": show_browser}, timeout=90)
     if r["status"] != "ok":
@@ -357,7 +393,6 @@ def init_token_pool_playwright(show_browser: bool = False):
             print(f"[POOL] ✅ init ok, sessions={rb.get('sessions')}")
 
 def crm_get(endpoint: str, params: dict = None):
-    # ВАЖНО: никакого page.evaluate тут нет. Мы просим Playwright worker выполнить fetch.
     r = _pw_call("fetch", {"endpoint": endpoint, "params": params}, timeout=PW_RESULT_TIMEOUT)
     if r["status"] != "ok":
         return "❌ Ошибка CRM(fetch): timeout"
@@ -635,7 +670,7 @@ print("🚀 Запуск API с очередью запросов...")
 fetch_allowed_users()
 Thread(target=periodic_fetch, daemon=True).start()
 
-# ВАЖНО: init делаем через Playwright worker (один поток)
+# init делаем через Playwright worker (один поток)
 Thread(target=init_token_pool_playwright, daemon=True).start()
 
 def cleanup_sessions():
