@@ -6,6 +6,9 @@ import random
 import itertools
 import traceback
 import hashlib
+import asyncio
+import aiohttp
+from concurrent.futures import ThreadPoolExecutor
 from threading import Thread, Lock, Event
 from typing import Optional, Dict, List, Any
 from queue import Queue
@@ -14,7 +17,7 @@ from urllib.parse import urlencode, urljoin
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from playwright.sync_api import sync_playwright, Page
+from playwright.async_api import async_playwright, Browser, Page
 
 # ================== 1. НАСТРОЙКИ ==================
 BOT_TOKEN = "8545598161:AAGM6HtppAjUOuSAYH0mX5oNcPU0SuO59N4"
@@ -51,28 +54,30 @@ class ResponseLike:
             raise ValueError("No JSON")
         return self._json_data
 
-# ================== 4. PLAYWRIGHT MANAGER ==================
+# ================== 4. PLAYWRIGHT MANAGER (АСИНХРОННЫЙ) ==================
 class PWManager:
     def __init__(self):
         self._pw = None
+        self._browsers: Dict[str, Browser] = {}
         self.ready = Event()
         self.started = False
+        self._lock = asyncio.Lock()
         
-    def start(self):
-        """Запускаем Playwright"""
+    async def start(self):
+        """Запускаем Playwright асинхронно"""
         if not self.started:
             try:
-                self._pw = sync_playwright().start()
+                self._pw = await async_playwright().start()
                 self.started = True
                 self.ready.set()
-                print("[PW] ✅ Playwright запущен")
+                print("[PW] ✅ Playwright запущен (async)")
             except Exception as e:
                 print(f"[PW] ❌ Ошибка запуска: {e}")
                 traceback.print_exc()
                 self.ready.set()
     
-    def create_session(self, username: str, password: str) -> Optional[Dict]:
-        """Создаем новую сессию"""
+    async def create_session(self, username: str, password: str) -> Optional[Dict]:
+        """Создаем новую сессию асинхронно"""
         if not self._pw:
             print("[SESSION] ❌ Playwright не инициализирован")
             return None
@@ -80,8 +85,9 @@ class PWManager:
         print(f"[SESSION] Создаем сессию для {username}")
         
         browser = None
+        context = None
         try:
-            browser = self._pw.chromium.launch(
+            browser = await self._pw.chromium.launch(
                 headless=True,
                 args=[
                     "--no-sandbox",
@@ -93,7 +99,7 @@ class PWManager:
                 timeout=60000
             )
             
-            context = browser.new_context(
+            context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 viewport={"width": 1920, "height": 1080},
                 locale="ru-RU",
@@ -101,25 +107,25 @@ class PWManager:
                 ignore_https_errors=True,
             )
             
-            page = context.new_page()
+            page = await context.new_page()
             
-            page.add_init_script("""
+            await page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                 window.chrome = {runtime: {}};
             """)
             
             # Логинимся
             print(f"[SESSION] Логин {username}...")
-            page.goto(LOGIN_PAGE, wait_until="networkidle", timeout=60000)
-            time.sleep(2)
+            await page.goto(LOGIN_PAGE, wait_until="networkidle", timeout=60000)
+            await asyncio.sleep(2)
             
-            page.fill(LOGIN_SELECTOR, username)
-            time.sleep(0.5)
-            page.fill(PASSWORD_SELECTOR, password)
-            time.sleep(0.5)
+            await page.fill(LOGIN_SELECTOR, username)
+            await asyncio.sleep(0.5)
+            await page.fill(PASSWORD_SELECTOR, password)
+            await asyncio.sleep(0.5)
             
-            page.click(SIGN_IN_BUTTON_SELECTOR)
-            time.sleep(3)
+            await page.click(SIGN_IN_BUTTON_SELECTOR)
+            await asyncio.sleep(3)
             
             # Проверяем успешность
             current_url = page.url
@@ -127,16 +133,16 @@ class PWManager:
             
             if "dashboard" not in current_url:
                 print("[SESSION] ⚠️ Dashboard не найден, пробуем перейти...")
-                page.goto(f"{BASE_URL}/dashboard", wait_until="networkidle", timeout=10000)
-                time.sleep(2)
+                await page.goto(f"{BASE_URL}/dashboard", wait_until="networkidle", timeout=10000)
+                await asyncio.sleep(2)
             
             # Переходим на страницу поиска
             search_url = urljoin(BASE_URL, "/dashboard/search")
-            page.goto(search_url, wait_until="networkidle", timeout=30000)
-            time.sleep(3)
+            await page.goto(search_url, wait_until="networkidle", timeout=30000)
+            await asyncio.sleep(3)
             
             # Получаем куки
-            cookies = context.cookies()
+            cookies = await context.cookies()
             cookies_dict = {c['name']: c['value'] for c in cookies}
             cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
             
@@ -180,13 +186,13 @@ class PWManager:
             traceback.print_exc()
             if browser:
                 try:
-                    browser.close()
+                    await browser.close()
                 except:
                     pass
             return None
     
-    def make_request(self, session_data: Dict, endpoint: str, params: dict = None):
-        """Делаем API запрос"""
+    async def make_request(self, session_data: Dict, endpoint: str, params: dict = None):
+        """Делаем API запрос асинхронно"""
         try:
             url = urljoin(BASE_URL, endpoint)
             if params:
@@ -196,23 +202,24 @@ class PWManager:
             headers = session_data["headers"].copy()
             headers["referer"] = session_data.get("search_url", urljoin(BASE_URL, "/dashboard/search"))
             
-            response = session_data["context"].request.get(url, headers=headers, timeout=30000)
+            context = session_data["context"]
+            response = await context.request.get(url, headers=headers, timeout=30000)
             
             session_data["last_used"] = int(time.time())
             
             result = {
                 "status": response.status,
-                "text": response.text(),
+                "text": await response.text(),
                 "success": response.status == 200
             }
             
             if response.status == 200:
                 try:
-                    result["json"] = response.json()
+                    result["json"] = await response.json()
                 except:
                     result["json"] = None
             else:
-                result["error"] = response.text()[:500]
+                result["error"] = (await response.text())[:500]
             
             return result
             
@@ -220,23 +227,32 @@ class PWManager:
             print(f"[REQUEST] ❌ Ошибка запроса: {e}")
             return {"error": str(e), "success": False}
 
+# Глобальный event loop
+global_loop = asyncio.new_event_loop()
 pw_manager = PWManager()
-pw_manager.start()
+
+# Запускаем Playwright в отдельном потоке
+def init_playwright():
+    asyncio.set_event_loop(global_loop)
+    global_loop.run_until_complete(pw_manager.start())
+    global_loop.run_until_complete(init_token_pool_async())
+
+Thread(target=init_playwright, daemon=True).start()
 pw_manager.ready.wait(30)
 
 # ================== 5. ПУЛ СЕССИЙ ==================
-def init_token_pool():
+async def init_token_pool_async():
     global pw_sessions, pw_cycle
 
     print("\n" + "=" * 60)
-    print("🔄 ИНИЦИАЛИЗАЦИЯ ПУЛА СЕССИЙ")
+    print("🔄 ИНИЦИАЛИЗАЦИЯ ПУЛА СЕССИЙ (async)")
     print("=" * 60)
     
     new_sessions = []
     for acc in accounts:
         print(f"[POOL] Создаем сессию для {acc['username']}...")
         
-        session_data = pw_manager.create_session(acc["username"], acc["password"])
+        session_data = await pw_manager.create_session(acc["username"], acc["password"])
         
         if session_data:
             new_sessions.append(session_data)
@@ -261,7 +277,9 @@ def get_next_session() -> Optional[Dict]:
     global pw_sessions, pw_cycle
 
     if not pw_sessions:
-        if not init_token_pool():
+        # Инициализируем синхронно
+        success = global_loop.run_until_complete(init_token_pool_async())
+        if not success:
             return None
 
     with PW_SESSIONS_LOCK:
@@ -275,8 +293,8 @@ def get_next_session() -> Optional[Dict]:
             s = next(pw_cycle)
             return s
 
-def refresh_session(username: str) -> Optional[Dict]:
-    """Обновляем сессию"""
+async def refresh_session_async(username: str) -> Optional[Dict]:
+    """Обновляем сессию асинхронно"""
     global pw_sessions, pw_cycle
     
     try:
@@ -290,11 +308,11 @@ def refresh_session(username: str) -> Optional[Dict]:
             old_session = next((s for s in pw_sessions if s.get("username") == username), None)
             if old_session and old_session.get("browser"):
                 try:
-                    old_session["browser"].close()
+                    await old_session["browser"].close()
                 except:
                     pass
         
-        new_session = pw_manager.create_session(acc["username"], acc["password"])
+        new_session = await pw_manager.create_session(acc["username"], acc["password"])
         
         if new_session:
             with PW_SESSIONS_LOCK:
@@ -313,8 +331,8 @@ def refresh_session(username: str) -> Optional[Dict]:
         return None
 
 # ================== 6. CRM GET ==================
-def crm_get(endpoint: str, params: dict = None):
-    """Основная функция для API запросов"""
+async def crm_get_async(endpoint: str, params: dict = None):
+    """Основная функция для API запросов (асинхронная)"""
     session = get_next_session()
     if not session:
         return ResponseLike(500, "❌ Нет доступных сессий")
@@ -322,7 +340,7 @@ def crm_get(endpoint: str, params: dict = None):
     username = session.get("username", "unknown")
     
     # Делаем запрос
-    result = pw_manager.make_request(session, endpoint, params)
+    result = await pw_manager.make_request(session, endpoint, params)
     
     if result.get("success"):
         return ResponseLike(
@@ -334,10 +352,10 @@ def crm_get(endpoint: str, params: dict = None):
         # Если ошибка аутентификации, пробуем обновить сессию
         if result.get("status") in [401, 403]:
             print(f"[CRM] ❌ Ошибка аутентификации, обновляем сессию...")
-            new_session = refresh_session(username)
+            new_session = await refresh_session_async(username)
             
             if new_session:
-                result = pw_manager.make_request(new_session, endpoint, params)
+                result = await pw_manager.make_request(new_session, endpoint, params)
                 if result.get("success"):
                     return ResponseLike(
                         status_code=result["status"],
@@ -359,10 +377,13 @@ def crm_worker():
     while True:
         try:
             func, args, kwargs, result_box = crm_queue.get()
-            res = func(*args, **kwargs)
+            # Запускаем асинхронную функцию в event loop
+            res = global_loop.run_until_complete(func(*args, **kwargs))
             result_box["result"] = res
             time.sleep(random.uniform(2.0, 3.0))
         except Exception as e:
+            print(f"[WORKER ERROR] {e}")
+            traceback.print_exc()
             result_box["error"] = str(e)
         finally:
             crm_queue.task_done()
@@ -371,7 +392,7 @@ Thread(target=crm_worker, daemon=True).start()
 
 def enqueue_crm_get(endpoint, params=None):
     result_box = {}
-    crm_queue.put((crm_get, (endpoint,), {"params": params}, result_box))
+    crm_queue.put((crm_get_async, (endpoint,), {"params": params}, result_box))
     t0 = time.time()
     while "result" not in result_box and "error" not in result_box:
         if time.time() - t0 > RESULT_TIMEOUT:
@@ -664,7 +685,7 @@ def debug_init_sessions():
         return jsonify({"error": "Forbidden"}), 403
     
     try:
-        success = init_token_pool()
+        success = global_loop.run_until_complete(init_token_pool_async())
         with PW_SESSIONS_LOCK:
             session_count = len(pw_sessions)
         
@@ -693,20 +714,14 @@ def health_check():
 
 # ================== 10. ЗАПУСК СЕРВЕРА ==================
 print("\n" + "=" * 60)
-print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА")
+print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА (Async)")
 print("=" * 60)
 
 # Загружаем разрешенных пользователей
 load_allowed_users()
 
-# Инициализируем пул сессий
+# Инициализируем пул сессий асинхронно
 time.sleep(2)
-init_success = init_token_pool()
-
-if not init_success:
-    print("\n⚠️ ВНИМАНИЕ: Не удалось создать сессии!")
-else:
-    print("\n✅ СЕРВЕР ГОТОВ К РАБОТЕ!")
 
 def cleanup_sessions():
     while True:
@@ -723,4 +738,4 @@ if __name__ == "__main__":
     print(f"\n🌐 Сервер запущен!")
     print(f"📋 Проверка: curl https://api.reft.site/api/health")
     print("\n✅ Готов к работе с Telegram мини-приложением!")
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True, use_reloader=False)
