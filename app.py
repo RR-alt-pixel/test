@@ -3,24 +3,20 @@ import os
 import time
 import json
 import random
+import itertools
 import traceback
 import hashlib
-import threading
-import queue
 import signal
 import sys
-import gc
-import resource
 from threading import Thread, Lock, Event
 from typing import Optional, Dict, List, Any
+from queue import Queue
 from urllib.parse import urlencode, urljoin
-from datetime import datetime
-import logging
 
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, Page
 
 # ================== 1. НАСТРОЙКИ ==================
 BOT_TOKEN = "8545598161:AAGM6HtppAjUOuSAYH0mX5oNcPU0SuO59N4"
@@ -35,534 +31,15 @@ LOGIN_SELECTOR = 'input[placeholder="Логин"]'
 PASSWORD_SELECTOR = 'input[placeholder="Пароль"]'
 SIGN_IN_BUTTON_SELECTOR = 'button[type="submit"]'
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('pena_api.log', encoding='utf-8')
-    ]
-)
-logger = logging.getLogger(__name__)
-
 # ================== 2. АККАУНТЫ ==================
 accounts = [
     {"username": "klon9", "password": "7755SSaa"},
 ]
 
-# ================== 3. PLAYWRIGHT В ОДНОМ ПОТОКЕ (ИСПРАВЛЕННЫЙ) ==================
-class PlaywrightWorker:
-    """Рабочий поток для ВСЕХ Playwright операций - оптимизирован для малой памяти"""
-    def __init__(self):
-        self.task_queue = queue.Queue(maxsize=100)
-        self.result_queues = {}
-        self.task_counter = 0
-        self.task_lock = Lock()
-        self.worker_thread = None
-        self.playwright = None
-        self.browser = None
-        self.context = None
-        self.page = None
-        self.fingerprint = None
-        self.cookies = {}
-        self.headers = {}
-        self.is_running = False
-        self.init_event = Event()
-        self.login_attempts = 0
-        self.max_login_attempts = 3
-        
-    def start(self):
-        """Запустить рабочий поток"""
-        if self.worker_thread and self.worker_thread.is_alive():
-            return
-        
-        self.worker_thread = Thread(target=self._worker_loop, daemon=True, name="PlaywrightWorker")
-        self.worker_thread.start()
-        self.is_running = True
-        logger.info("✅ Рабочий поток запущен")
-        
-    def _worker_loop(self):
-        """Главный цикл рабочего потока - оптимизирован для малой памяти"""
-        # Увеличиваем лимит файловых дескрипторов
-        try:
-            resource.setrlimit(resource.RLIMIT_NOFILE, (65536, 65536))
-            logger.info("✅ Лимит файловых дескрипторов увеличен до 65536")
-        except Exception as e:
-            logger.warning(f"⚠️ Не удалось увеличить лимит файловых дескрипторов: {e}")
-        
-        logger.info("🚀 Запуск Playwright в рабочем потоке...")
-        
-        try:
-            # 1. Инициализация Playwright
-            logger.info("Инициализация Playwright...")
-            self.playwright = sync_playwright().start()
-            logger.info("✅ Playwright запущен")
-            
-            # 2. Запуск браузера в УЛЬТРА-ЛЕГКОМ режиме
-            logger.info("Запуск браузера в легком режиме...")
-            self.browser = self.playwright.chromium.launch(
-                headless=True,
-                args=[
-                    # Безопасность
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    
-                    # Оптимизация памяти
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--single-process",          # ВАЖНО: только один процесс
-                    "--no-zygote",              # ВАЖНО: без зиготы
-                    "--no-first-run",
-                    
-                    # Отключение ненужного
-                    "--disable-extensions",
-                    "--disable-plugins",
-                    "--disable-background-networking",
-                    "--disable-default-apps",
-                    "--disable-component-update",
-                    "--disable-sync",
-                    "--disable-translate",
-                    
-                    # Отключение фич для экономии памяти
-                    "--disable-features=AudioServiceOutOfProcess,TranslateUI",
-                    "--disable-backgrounding-occluded-windows",
-                    "--disable-renderer-backgrounding",
-                    "--disable-ipc-flooding-protection",
-                    
-                    # Дополнительная оптимизация
-                    "--disable-background-timer-throttling",
-                    "--disable-client-side-phishing-detection",
-                    "--disable-hang-monitor",
-                    "--disable-popup-blocking",
-                    "--disable-prompt-on-repost",
-                    "--disable-domain-reliability",
-                    "--disable-speech-api",
-                    
-                    # Разрешение
-                    "--window-size=1280,720",
-                    "--use-gl=egl"
-                ],
-                # Дополнительные настройки
-                chromium_sandbox=False,
-                handle_sigint=False,
-                handle_sigterm=False,
-                handle_sighup=False,
-                timeout=60000
-            )
-            logger.info("✅ Браузер запущен в легком режиме")
-            
-            # 3. Создание контекста с минимальными настройками
-            logger.info("Создание контекста...")
-            self.context = self.browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 720},
-                locale="ru-RU",
-                timezone_id="Europe/Moscow",
-                ignore_https_errors=True,
-                # Минимальные настройки
-                java_script_enabled=True,
-                bypass_csp=False,
-                has_touch=False,
-                is_mobile=False,
-                device_scale_factor=1,
-                # Убираем лишнее
-                storage_state=None,
-                permissions=[]
-            )
-            logger.info("✅ Контекст создан")
-            
-            # 4. Создание страницы
-            self.page = self.context.new_page()
-            
-            # 5. Минимальные anti-detection скрипты
-            self.page.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                Object.defineProperty(navigator, 'plugins', { 
-                    get: () => [{ 
-                        0: {type: "application/pdf"}, 
-                        length: 1,
-                        item: function() { return null; }
-                    }] 
-                });
-            """)
-            
-            # 6. Логин в систему
-            logger.info("🔐 Выполняем логин...")
-            login_success = self._login()
-            
-            if not login_success:
-                logger.error("❌ Не удалось выполнить логин")
-                self.init_event.set()
-                return
-            
-            logger.info("✅ Инициализация завершена!")
-            self.init_event.set()
-            
-            # 7. Основной цикл обработки задач
-            while self.is_running:
-                try:
-                    task = self.task_queue.get(timeout=0.5)
-                    task_id, task_type, task_data, result_queue = task
-                    
-                    logger.debug(f"📥 Получена задача {task_id}: {task_type}")
-                    
-                    try:
-                        # Принудительная сборка мусора перед задачей
-                        gc.collect()
-                        
-                        result = self._process_task(task_type, task_data)
-                        
-                        # Принудительная сборка мусора после задачи
-                        gc.collect()
-                        
-                        logger.debug(f"✅ Задача {task_id} выполнена")
-                        result_queue.put((task_id, {"success": True, "data": result}))
-                    except Exception as e:
-                        logger.error(f"❌ Ошибка в задаче {task_id}: {str(e)[:200]}")
-                        result_queue.put((task_id, {
-                            "success": False, 
-                            "error": str(e),
-                            "traceback": traceback.format_exc()
-                        }))
-                    
-                    self.task_queue.task_done()
-                    
-                except queue.Empty:
-                    continue
-                except Exception as e:
-                    logger.error(f"❌ Ошибка в цикле обработки: {e}")
-                    
-        except Exception as e:
-            logger.error(f"❌ Критическая ошибка в рабочем потоке: {e}")
-            traceback.print_exc()
-            self.init_event.set()
-            
-    def _login(self):
-        """Логин в pena.rest"""
-        for attempt in range(self.max_login_attempts):
-            try:
-                logger.info(f"🔐 Попытка логина #{attempt + 1}")
-                
-                # Очищаем куки
-                self.context.clear_cookies()
-                time.sleep(1)
-                
-                # Переходим на страницу логина
-                logger.info(f"🌐 Переход на {LOGIN_PAGE}")
-                self.page.goto(LOGIN_PAGE, wait_until="domcontentloaded", timeout=30000)
-                time.sleep(2)
-                
-                # Проверяем капчу
-                page_content = self.page.content()
-                if any(word in page_content.lower() for word in ["captcha", "капча", "robot", "робот"]):
-                    logger.warning("⚠️ Обнаружена капча! Ждем 10 секунд...")
-                    time.sleep(10)
-                    continue
-                
-                # Заполняем логин
-                logger.info(f"👤 Ввод логина: {accounts[0]['username']}")
-                self.page.fill(LOGIN_SELECTOR, accounts[0]["username"])
-                time.sleep(random.uniform(0.3, 0.7))
-                
-                # Заполняем пароль
-                logger.info("🔑 Ввод пароля")
-                self.page.fill(PASSWORD_SELECTOR, accounts[0]["password"])
-                time.sleep(random.uniform(0.3, 0.7))
-                
-                # Нажимаем кнопку
-                logger.info("🖱️ Нажатие кнопки входа")
-                self.page.click(SIGN_IN_BUTTON_SELECTOR)
-                time.sleep(3)
-                
-                # Проверяем успешность
-                current_url = self.page.url
-                logger.info(f"📍 Текущий URL: {current_url}")
-                
-                if any(keyword in current_url for keyword in ["dashboard", "search", "main"]):
-                    logger.info("✅ Логин успешен")
-                    
-                    # Краткая пауза
-                    time.sleep(1)
-                    
-                    # Получаем cookies
-                    cookies_list = self.context.cookies()
-                    self.cookies = {c['name']: c['value'] for c in cookies_list}
-                    
-                    # Генерируем fingerprint
-                    self.fingerprint = self._generate_fingerprint()
-                    
-                    # Создаем заголовки
-                    self._create_headers()
-                    
-                    logger.info(f"📊 Cookies: {len(self.cookies)} шт")
-                    
-                    # Логируем важные куки
-                    important_cookies = ['cf_clearance', 'aegis_session', 'access_token']
-                    for cookie_name in important_cookies:
-                        if cookie_name in self.cookies:
-                            value = self.cookies[cookie_name]
-                            logger.info(f"🍪 {cookie_name}: {value[:20]}...")
-                    
-                    return True
-                else:
-                    logger.warning(f"⚠️ Логин неудачен, URL: {current_url[:50]}...")
-                    time.sleep(2)
-                    
-            except Exception as e:
-                logger.error(f"❌ Ошибка при логине (попытка {attempt + 1}): {e}")
-                time.sleep(2)
-        
-        logger.error("❌ Все попытки логина провалились")
-        return False
-    
-    def _generate_fingerprint(self):
-        """Генерация fingerprint"""
-        try:
-            # Простая генерация чтобы не нагружать память
-            data = {
-                "username": accounts[0]["username"],
-                "timestamp": int(time.time()),
-                "random": random.randint(1000, 9999),
-                "user_agent": "Chrome/120.0.0.0"
-            }
-            data_str = json.dumps(data, sort_keys=True)
-            return hashlib.sha256(data_str.encode()).hexdigest()
-        except:
-            return hashlib.sha256(f"{int(time.time())}{random.randint(1000, 9999)}".encode()).hexdigest()
-    
-    def _create_headers(self):
-        """Создание заголовков для запросов"""
-        cookie_header = "; ".join([f"{k}={v}" for k, v in self.cookies.items()])
-        
-        self.headers = {
-            "accept": "application/json, text/plain, */*",
-            "accept-language": "ru-RU,ru;q=0.9",
-            "content-type": "application/json",
-            "referer": f"{BASE_URL}/dashboard/search",
-            "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-origin",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "x-device-fingerprint": self.fingerprint or "",
-            "cookie": cookie_header,
-            "x-requested-with": "XMLHttpRequest"
-        }
-    
-    def _process_task(self, task_type: str, task_data: Any):
-        """Обработка задачи"""
-        if task_type == "api_request":
-            return self._make_api_request(task_data)
-        elif task_type == "test_connection":
-            return self._test_connection()
-        elif task_type == "get_info":
-            return self._get_worker_info()
-        elif task_type == "re_login":
-            return self._re_login()
-        else:
-            raise ValueError(f"Неизвестный тип задачи: {task_type}")
-    
-    def _make_api_request(self, task_data: Dict):
-        """Выполнение API запроса"""
-        endpoint = task_data["endpoint"]
-        params = task_data.get("params", {})
-        
-        # Формируем URL
-        url = urljoin(BASE_URL, endpoint)
-        if params:
-            query_string = urlencode(params, doseq=True)
-            url = f"{url}?{query_string}" if "?" not in url else f"{url}&{query_string}"
-        
-        logger.info(f"📡 Запрос: {url[:80]}...")
-        
-        start_time = time.time()
-        
-        try:
-            response = self.context.request.get(
-                url, 
-                headers=self.headers, 
-                timeout=20000  # Уменьшенный таймаут
-            )
-            
-            elapsed = time.time() - start_time
-            logger.info(f"📊 Ответ: {response.status} за {elapsed:.1f}сек")
-            
-            response_text = response.text()
-            
-            result = {
-                "status": response.status,
-                "url": url,
-                "text": response_text,
-                "elapsed": elapsed
-            }
-            
-            if response.status == 200:
-                try:
-                    json_data = response.json()
-                    result["json"] = json_data
-                    if isinstance(json_data, list):
-                        logger.info(f"📝 Найдено записей: {len(json_data)}")
-                except:
-                    result["json"] = None
-            else:
-                result["error"] = response_text[:200]
-                logger.warning(f"⚠️ Ошибка {response.status}")
-            
-            return result
-            
-        except Exception as e:
-            elapsed = time.time() - start_time
-            logger.error(f"❌ Исключение при запросе за {elapsed:.1f}сек: {str(e)[:100]}")
-            
-            # Если EPIPE ошибка - перезапускаем
-            if "EPIPE" in str(e) or "Broken pipe" in str(e):
-                logger.critical("💥 EPIPE/Broken pipe - требуется перезапуск браузера")
-                raise RuntimeError("EPIPE_ERROR")
-            
-            raise
-    
-    def _test_connection(self):
-        """Тестовый запрос"""
-        try:
-            test_url = urljoin(BASE_URL, "/api/v3/search/iin?iin=931229400494")
-            response = self.context.request.get(test_url, headers=self.headers, timeout=10000)
-            return {
-                "test_passed": response.status == 200,
-                "status": response.status,
-                "elapsed": 0
-            }
-        except Exception as e:
-            return {"test_passed": False, "error": str(e)}
-    
-    def _get_worker_info(self):
-        """Информация о рабочем потоке"""
-        return {
-            "thread": threading.current_thread().name,
-            "cookies_count": len(self.cookies),
-            "fingerprint": self.fingerprint[:20] + "..." if self.fingerprint else None,
-            "is_running": self.is_running,
-            "queue_size": self.task_queue.qsize(),
-            "memory_usage": self._get_memory_usage()
-        }
-    
-    def _get_memory_usage(self):
-        """Получить использование памяти"""
-        try:
-            import psutil
-            process = psutil.Process()
-            return {
-                "rss_mb": process.memory_info().rss / 1024 / 1024,
-                "vms_mb": process.memory_info().vms / 1024 / 1024,
-                "percent": process.memory_percent()
-            }
-        except:
-            return {"error": "psutil not available"}
-    
-    def _re_login(self):
-        """Перелогин"""
-        logger.info("🔄 Перелогин...")
-        success = self._login()
-        return {"success": success}
-    
-    def submit_task(self, task_type: str, task_data: Dict, timeout: int = 25):
-        """Отправить задачу в рабочий поток"""
-        with self.task_lock:
-            task_id = self.task_counter
-            self.task_counter += 1
-            
-        result_queue = queue.Queue()
-        self.result_queues[task_id] = result_queue
-        
-        # Проверяем не перегружена ли очередь
-        if self.task_queue.qsize() > 50:
-            logger.warning(f"⚠️ Очередь перегружена: {self.task_queue.qsize()} задач")
-        
-        # Отправляем задачу
-        self.task_queue.put((task_id, task_type, task_data, result_queue))
-        
-        # Ждем результат
-        try:
-            result_id, result = result_queue.get(timeout=timeout)
-            
-            if result_id != task_id:
-                raise RuntimeError(f"Несоответствие ID задачи")
-            
-            return result
-            
-        except queue.Empty:
-            logger.error(f"⏰ Таймаут задачи {task_id}")
-            raise TimeoutError(f"Таймаут ожидания задачи {task_id}")
-        finally:
-            with self.task_lock:
-                if task_id in self.result_queues:
-                    del self.result_queues[task_id]
-    
-    def stop(self):
-        """Корректная остановка рабочего потока"""
-        logger.info("🛑 Корректная остановка PlaywrightWorker...")
-        self.is_running = False
-        
-        # Очищаем очередь
-        while not self.task_queue.empty():
-            try:
-                self.task_queue.get_nowait()
-                self.task_queue.task_done()
-            except queue.Empty:
-                break
-        
-        # Ждем завершения потока
-        if self.worker_thread and self.worker_thread.is_alive():
-            self.worker_thread.join(timeout=5)
-        
-        # Закрываем браузер
-        if self.browser:
-            try:
-                self.browser.close()
-                logger.info("✅ Браузер закрыт")
-            except Exception as e:
-                logger.warning(f"⚠️ Ошибка закрытия браузера: {e}")
-        
-        # Останавливаем Playwright
-        if self.playwright:
-            try:
-                self.playwright.stop()
-                logger.info("✅ Playwright остановлен")
-            except Exception as e:
-                logger.warning(f"⚠️ Ошибка остановки Playwright: {e}")
-        
-        # Принудительная сборка мусора
-        gc.collect()
-        
-        logger.info("✅ PlaywrightWorker остановлен")
-
-# Глобальный экземпляр рабочего потока
-pw_worker = PlaywrightWorker()
-
-# ================== 4. ОБРАБОТЧИКИ СИГНАЛОВ ==================
-def graceful_shutdown(signum, frame):
-    """Корректное завершение работы"""
-    logger.info(f"📴 Получен сигнал {signum}, завершаем работу...")
-    
-    # Останавливаем Playwright worker
-    if 'pw_worker' in globals():
-        pw_worker.stop()
-    
-    # Даем время на завершение
-    time.sleep(1)
-    
-    logger.info("✅ Корректное завершение выполнено")
-    sys.exit(0)
-
-# Регистрируем обработчики сигналов
-signal.signal(signal.SIGTERM, graceful_shutdown)
-signal.signal(signal.SIGINT, graceful_shutdown)
-
-# ================== 5. FLASK API ==================
-app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+# ================== 3. ПУЛ СЕССИЙ ==================
+pw_sessions: List[Dict[str, Any]] = []
+pw_cycle = None
+PW_SESSIONS_LOCK = Lock()
 
 class ResponseLike:
     def __init__(self, status_code: int, text: str, json_data=None):
@@ -575,71 +52,492 @@ class ResponseLike:
             raise ValueError("No JSON")
         return self._json_data
 
-def crm_get(endpoint: str, params: dict = None, max_retries: int = 2):
-    """API запрос через Playwright worker с повторными попытками"""
-    for retry in range(max_retries + 1):
+# ================== 4. PLAYWRIGHT MANAGER (ИСПРАВЛЕННЫЙ) ==================
+class PWManager:
+    def __init__(self):
+        self._pw = None
+        self.ready = Event()
+        self.started = False
+        
+    def start(self):
+        """Запускаем Playwright"""
+        if not self.started:
+            try:
+                self._pw = sync_playwright().start()
+                self.started = True
+                self.ready.set()
+                print("[PW] ✅ Playwright запущен")
+            except Exception as e:
+                print(f"[PW] ❌ Ошибка запуска: {e}")
+                traceback.print_exc()
+                self.ready.set()
+    
+    def create_session(self, username: str, password: str) -> Optional[Dict]:
+        """Создаем новую сессию - ОПТИМИЗИРОВАННАЯ ДЛЯ МАЛОЙ ПАМЯТИ"""
+        if not self._pw:
+            print("[SESSION] ❌ Playwright не инициализирован")
+            return None
+        
+        print(f"[SESSION] Создаем сессию для {username}")
+        
+        browser = None
         try:
-            result = pw_worker.submit_task("api_request", {
-                "endpoint": endpoint,
-                "params": params
-            }, timeout=25)
+            # ОПТИМИЗИРОВАННЫЙ запуск браузера
+            browser = self._pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--single-process",           # ВАЖНО: один процесс
+                    "--no-zygote",               # ВАЖНО: без зиготы
+                    "--no-first-run",
+                    "--disable-extensions",
+                    "--disable-background-networking",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-breakpad",
+                    "--disable-component-update",
+                    "--disable-domain-reliability",
+                    "--disable-features=AudioServiceOutOfProcess,TranslateUI",
+                    "--disable-ipc-flooding-protection",
+                    "--disable-renderer-backgrounding",
+                    "--disable-sync",
+                    "--disable-default-apps",
+                    "--window-size=1280,720",
+                    "--disable-features=IsolateOrigins,site-per-process"
+                ],
+                timeout=60000,
+                chromium_sandbox=False
+            )
             
-            if result["success"]:
-                data = result["data"]
-                
-                # Проверяем ошибку авторизации
-                if data.get("status") in [401, 403, 419]:
-                    logger.warning(f"⚠️ Ошибка авторизации {data['status']}")
-                    if retry < max_retries:
-                        logger.info("🔄 Пробуем перелогин...")
-                        try:
-                            relogin_result = pw_worker.submit_task("re_login", {}, timeout=20)
-                            if relogin_result.get("success"):
-                                continue  # Повторяем запрос
-                        except:
-                            pass
-                
-                return ResponseLike(
-                    status_code=data["status"],
-                    text=data["text"],
-                    json_data=data.get("json")
-                )
+            # ОПТИМИЗИРОВАННЫЙ контекст
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 720},
+                locale="ru-RU",
+                timezone_id="Europe/Moscow",
+                ignore_https_errors=True,
+                storage_state=None,  # Не сохраняем состояние
+                permissions=[]
+            )
+            
+            page = context.new_page()
+            
+            # МИНИМАЛЬНЫЕ anti-detection скрипты
+            page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                window.chrome = {runtime: {}};
+            """)
+            
+            # Логинимся с таймаутами
+            print(f"[SESSION] Логин {username}...")
+            page.goto(LOGIN_PAGE, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(2)
+            
+            # Проверяем доступность полей
+            login_field = page.query_selector(LOGIN_SELECTOR)
+            password_field = page.query_selector(PASSWORD_SELECTOR)
+            
+            if not login_field or not password_field:
+                print("[SESSION] ❌ Поля логина/пароля не найдены")
+                return None
+            
+            # Заполняем поля
+            login_field.fill(username)
+            time.sleep(random.uniform(0.3, 0.7))
+            
+            password_field.fill(password)
+            time.sleep(random.uniform(0.3, 0.7))
+            
+            # Нажимаем кнопку
+            submit_button = page.query_selector(SIGN_IN_BUTTON_SELECTOR)
+            if submit_button:
+                submit_button.click()
             else:
-                error_msg = result.get('error', 'Unknown error')
+                page.click(SIGN_IN_BUTTON_SELECTOR)
+            
+            time.sleep(3)
+            
+            # Проверяем успешность логина
+            current_url = page.url
+            print(f"[SESSION] Текущий URL: {current_url}")
+            
+            # Проверяем несколько признаков успешного входа
+            success_indicators = ["dashboard", "search", "main", "profile"]
+            if not any(indicator in current_url for indicator in success_indicators):
+                print("[SESSION] ⚠️ Возможно неудачный логин, пробуем перейти на dashboard...")
+                try:
+                    page.goto(f"{BASE_URL}/dashboard", wait_until="domcontentloaded", timeout=10000)
+                    time.sleep(2)
+                except:
+                    pass
+            
+            # Переходим на страницу поиска
+            search_url = urljoin(BASE_URL, "/dashboard/search")
+            try:
+                page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
+                time.sleep(2)
+            except:
+                print("[SESSION] ⚠️ Не удалось перейти на страницу поиска")
+            
+            # Получаем куки
+            cookies = context.cookies()
+            cookies_dict = {c['name']: c['value'] for c in cookies}
+            cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+            
+            print(f"[SESSION] Получено {len(cookies)} кук")
+            
+            # Проверяем важные куки
+            important_cookies = ['cf_clearance', 'aegis_session', 'access_token']
+            for cookie_name in important_cookies:
+                if cookie_name in cookies_dict:
+                    print(f"[SESSION] ✅ {cookie_name}: ЕСТЬ")
+                else:
+                    print(f"[SESSION] ⚠️ {cookie_name}: НЕТ")
+            
+            # Генерируем fingerprint
+            fingerprint = hashlib.sha256(f"{username}{int(time.time())}{random.randint(1000, 9999)}".encode()).hexdigest()
+            print(f"[SESSION] Fingerprint: {fingerprint[:20]}...")
+            
+            # Формируем заголовки
+            headers = {
+                "accept": "application/json, text/plain, */*",
+                "accept-language": "ru-RU,ru;q=0.9",
+                "content-type": "application/json",
+                "x-device-fingerprint": fingerprint,
+                "x-requested-with": "XMLHttpRequest",
+                "referer": search_url,
+                "cookie": cookie_header,
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "same-origin"
+            }
+            
+            # Создаем объект сессии
+            session_data = {
+                "username": username,
+                "fingerprint": fingerprint,
+                "cookies": cookies_dict,
+                "cookie_header": cookie_header,
+                "headers": headers,
+                "context": context,
+                "browser": browser,
+                "page": page,
+                "created_at": int(time.time()),
+                "last_used": int(time.time()),
+                "search_url": search_url,
+                "is_active": True
+            }
+            
+            # Тестируем сессию
+            test_result = self._test_session(session_data)
+            if test_result:
+                print(f"[SESSION] ✅ Сессия для {username} создана и рабочая")
+            else:
+                print(f"[SESSION] ⚠️ Сессия создана, но тест не прошел")
+                # Все равно возвращаем, может заработает
+            
+            return session_data
                 
-                # Если EPIPE ошибка - перезапускаем worker
-                if "EPIPE_ERROR" in error_msg and retry < max_retries:
-                    logger.critical("💥 EPIPE ошибка, перезапускаем worker...")
-                    pw_worker.stop()
-                    time.sleep(3)
-                    pw_worker.start()
-                    pw_worker.init_event.wait(30)
-                    continue
-                
-                logger.error(f"❌ Ошибка в CRM GET: {error_msg}")
-                return ResponseLike(500, error_msg)
-                
-        except TimeoutError as e:
-            logger.error(f"⏰ Таймаут в CRM GET (попытка {retry + 1}): {e}")
-            if retry < max_retries:
-                time.sleep(1)
-                continue
-            return ResponseLike(504, "Таймаут запроса")
         except Exception as e:
-            logger.error(f"❌ Исключение в CRM GET (попытка {retry + 1}): {e}")
-            if retry < max_retries:
-                time.sleep(1)
-                continue
-            return ResponseLike(500, str(e))
+            print(f"[SESSION] ❌ Ошибка создания сессии: {e}")
+            traceback.print_exc()
+            if browser:
+                try:
+                    browser.close()
+                except:
+                    pass
+            return None
+    
+    def _test_session(self, session_data: Dict) -> bool:
+        """Тестируем сессию"""
+        try:
+            test_url = urljoin(BASE_URL, "/api/v3/search/iin?iin=931229400494")
+            response = session_data["context"].request.get(
+                test_url, 
+                headers=session_data["headers"], 
+                timeout=10000
+            )
+            
+            print(f"[TEST] Статус теста: {response.status}")
+            
+            if response.status == 200:
+                try:
+                    data = response.json()
+                    print(f"[TEST] ✅ Тест успешен, найдено {len(data) if isinstance(data, list) else 'данных'}")
+                    return True
+                except:
+                    print(f"[TEST] ⚠️ Ответ не JSON")
+                    return True
+            elif response.status in [401, 403]:
+                print(f"[TEST] ❌ Ошибка авторизации: {response.status}")
+                return False
+            else:
+                print(f"[TEST] ⚠️ Неожиданный статус: {response.status}")
+                return True
+                
+        except Exception as e:
+            print(f"[TEST] ❌ Исключение: {e}")
+            return False
+    
+    def make_request(self, session_data: Dict, endpoint: str, params: dict = None):
+        """Делаем API запрос"""
+        try:
+            # Формируем URL
+            url = urljoin(BASE_URL, endpoint)
+            if params:
+                query_string = urlencode(params, doseq=True)
+                url = f"{url}?{query_string}" if "?" not in url else f"{url}&{query_string}"
+            
+            # Обновляем заголовки
+            headers = session_data["headers"].copy()
+            headers["referer"] = session_data.get("search_url", urljoin(BASE_URL, "/dashboard/search"))
+            
+            print(f"[REQUEST] 📡 Запрос к: {url[:80]}...")
+            
+            # Отправляем запрос
+            response = session_data["context"].request.get(
+                url, 
+                headers=headers, 
+                timeout=25000  # Уменьшенный таймаут
+            )
+            
+            # Обновляем время использования
+            session_data["last_used"] = int(time.time())
+            
+            result = {
+                "status": response.status,
+                "text": response.text(),
+                "success": response.status == 200
+            }
+            
+            if response.status == 200:
+                try:
+                    result["json"] = response.json()
+                except:
+                    result["json"] = None
+            else:
+                error_text = response.text()[:300]
+                print(f"[REQUEST] ❌ Ошибка {response.status}: {error_text}")
+                result["error"] = error_text
+            
+            return result
+            
+        except Exception as e:
+            print(f"[REQUEST] ❌ Ошибка запроса: {e}")
+            return {"error": str(e), "success": False, "exception": True}
+
+pw_manager = PWManager()
+pw_manager.start()
+pw_manager.ready.wait(30)
+
+# ================== 5. ПУЛ СЕССИЙ ==================
+def init_token_pool():
+    global pw_sessions, pw_cycle
+
+    print("\n" + "=" * 60)
+    print("🔄 ИНИЦИАЛИЗАЦИЯ ПУЛА СЕССИЙ")
+    print("=" * 60)
+    
+    new_sessions = []
+    for acc in accounts:
+        print(f"[POOL] Создаем сессию для {acc['username']}...")
+        
+        session_data = pw_manager.create_session(acc["username"], acc["password"])
+        
+        if session_data:
+            new_sessions.append(session_data)
+            print(f"[POOL] ✅ Сессия создана")
+        else:
+            print(f"[POOL] ❌ Не удалось создать сессию")
+
+    with PW_SESSIONS_LOCK:
+        pw_sessions = new_sessions
+        pw_cycle = itertools.cycle(pw_sessions) if pw_sessions else None
+
+    if pw_sessions:
+        print(f"\n[POOL] ✅ Пул инициализирован!")
+        print(f"[POOL] Активных сессий: {len(pw_sessions)}")
+    else:
+        print("\n[POOL] ⚠️ ПУСТОЙ ПУЛ СЕССИЙ!")
+    
+    print("=" * 60)
+    return len(pw_sessions) > 0
+
+def get_next_session() -> Optional[Dict]:
+    global pw_sessions, pw_cycle
+
+    if not pw_sessions:
+        if not init_token_pool():
+            return None
+
+    with PW_SESSIONS_LOCK:
+        if pw_cycle is None:
+            pw_cycle = itertools.cycle(pw_sessions)
+        try:
+            s = next(pw_cycle)
+            return s
+        except StopIteration:
+            pw_cycle = itertools.cycle(pw_sessions)
+            s = next(pw_cycle)
+            return s
+
+def refresh_session(username: str) -> Optional[Dict]:
+    """Обновляем сессию"""
+    global pw_sessions, pw_cycle
+    
+    try:
+        print(f"[REFRESH] 🔄 Обновление сессии для {username}...")
+        
+        acc = next((a for a in accounts if a["username"] == username), None)
+        if not acc:
+            return None
+        
+        with PW_SESSIONS_LOCK:
+            # Закрываем старую сессию
+            old_session = next((s for s in pw_sessions if s.get("username") == username), None)
+            if old_session and old_session.get("browser"):
+                try:
+                    old_session["browser"].close()
+                except:
+                    pass
+        
+        # Создаем новую сессию
+        new_session = pw_manager.create_session(acc["username"], acc["password"])
+        
+        if new_session:
+            with PW_SESSIONS_LOCK:
+                # Удаляем старую и добавляем новую
+                pw_sessions = [s for s in pw_sessions if s.get("username") != username]
+                pw_sessions.append(new_session)
+                pw_cycle = itertools.cycle(pw_sessions)
+            
+            print(f"[REFRESH] ✅ Сессия обновлена")
+            return new_session
+        else:
+            print(f"[REFRESH] ❌ Не удалось обновить сессию")
+            return None
+            
+    except Exception as e:
+        print(f"[REFRESH ERROR] {e}")
+        return None
+
+# ================== 6. CRM GET С ПОВТОРНЫМИ ПОПЫТКАМИ ==================
+def crm_get(endpoint: str, params: dict = None, max_retries: int = 2):
+    """Основная функция для API запросов с повторными попытками"""
+    for retry in range(max_retries + 1):
+        session = get_next_session()
+        if not session:
+            return ResponseLike(500, "❌ Нет доступных сессий")
+        
+        username = session.get("username", "unknown")
+        
+        # Делаем запрос
+        result = pw_manager.make_request(session, endpoint, params)
+        
+        if result.get("success"):
+            return ResponseLike(
+                status_code=result["status"],
+                text=result["text"],
+                json_data=result.get("json")
+            )
+        else:
+            # Проверяем нужно ли обновлять сессию
+            status = result.get("status")
+            error = result.get("error", "")
+            
+            # Если ошибка аутентификации или EPIPE
+            if status in [401, 403, 419] or "EPIPE" in str(error) or retry == max_retries:
+                if retry < max_retries:
+                    print(f"[CRM] ❌ Ошибка {status}, пробуем обновить сессию (попытка {retry + 1})...")
+                    new_session = refresh_session(username)
+                    
+                    if new_session:
+                        # Пробуем с новой сессией
+                        continue
+                    else:
+                        print(f"[CRM] ❌ Не удалось обновить сессию")
+                else:
+                    print(f"[CRM] ❌ Все попытки исчерпаны")
+            
+            return ResponseLike(
+                status_code=result.get("status", 500),
+                text=result.get("error", result.get("text", "Unknown error")),
+                json_data=None
+            )
     
     return ResponseLike(500, "Все попытки запроса провалились")
 
-# ================== 6. ПОИСКОВЫЕ ФУНКЦИИ ==================
+# ================== 7. ОЧЕРЕДЬ ЗАПРОСОВ ==================
+crm_queue = Queue(maxsize=50)  # Ограничиваем очередь
+RESULT_TIMEOUT = 45  # Уменьшенный таймаут
+
+def crm_worker():
+    """Рабочий поток для обработки запросов"""
+    while True:
+        try:
+            func, args, kwargs, result_box = crm_queue.get()
+            
+            try:
+                res = func(*args, **kwargs)
+                result_box["result"] = res
+            except Exception as e:
+                result_box["error"] = str(e)
+            
+            # Задержка между запросами для снижения нагрузки
+            time.sleep(random.uniform(1.5, 2.5))
+            
+        except Exception as e:
+            print(f"[WORKER ERROR] {e}")
+        finally:
+            crm_queue.task_done()
+
+# Запускаем 2 рабочих потока для обработки запросов
+for i in range(2):
+    Thread(target=crm_worker, daemon=True, name=f"CRM-Worker-{i}").start()
+
+def enqueue_crm_get(endpoint, params=None):
+    """Добавляем запрос в очередь"""
+    # Проверяем не перегружена ли очередь
+    if crm_queue.qsize() > 40:
+        return {"status": "queue_full", "queue_size": crm_queue.qsize()}
+    
+    result_box = {}
+    crm_queue.put((crm_get, (endpoint,), {"params": params, "max_retries": 1}, result_box))
+    
+    # Ждем результат
+    t0 = time.time()
+    while "result" not in result_box and "error" not in result_box:
+        if time.time() - t0 > RESULT_TIMEOUT:
+            return {"status": "timeout", "elapsed": time.time() - t0}
+        time.sleep(0.1)
+    
+    if "error" in result_box:
+        return {"status": "error", "error": result_box["error"]}
+    
+    return {"status": "ok", "result": result_box["result"]}
+
+# ================== 8. ПОИСКОВЫЕ ФУНКЦИИ ==================
 def search_by_iin(iin: str):
-    logger.info(f"🔍 Поиск по ИИН: {iin}")
+    """Поиск по ИИН"""
+    print(f"[SEARCH IIN] 🔍 Запрос: {iin}")
     
-    resp = crm_get("/api/v3/search/iin", params={"iin": iin})
+    r = enqueue_crm_get("/api/v3/search/iin", params={"iin": iin})
     
+    if r["status"] == "queue_full":
+        return "⌛ Очередь перегружена. Попробуйте позже."
+    elif r["status"] == "timeout":
+        return "⏰ Таймаут запроса. Попробуйте снова."
+    elif r["status"] != "ok":
+        return f"❌ Ошибка: {r.get('error', 'Неизвестная ошибка')}"
+    
+    resp = r["result"]
     if isinstance(resp, str):
         return resp
     if resp.status_code == 404:
@@ -650,7 +548,7 @@ def search_by_iin(iin: str):
     try:
         data = resp.json()
     except:
-        return f"❌ Не удалось распарсить ответ"
+        return "❌ Не удалось обработать ответ сервера."
     
     if not isinstance(data, list) or not data:
         return "⚠️ Ничего не найдено по ИИН."
@@ -664,18 +562,30 @@ def search_by_iin(iin: str):
             result += f"\n   📱 {p.get('phone_number','')}"
         if p.get('birthday'):
             result += f"\n   📅 {p.get('birthday','')}"
+        if p.get('source'):
+            result += f"\n   📍 Источник: {p.get('source')}"
         results.append(result)
     
     return "\n\n".join(results)
 
 def search_by_phone(phone: str):
+    """Поиск по телефону"""
     clean = ''.join(filter(str.isdigit, phone))
     if clean.startswith("8"):
         clean = "7" + clean[1:]
     
-    logger.info(f"🔍 Поиск по телефону: {phone} (чистый: {clean})")
+    print(f"[SEARCH PHONE] 🔍 Запрос: {phone} -> {clean}")
     
-    resp = crm_get("/api/v3/search/phone", params={"phone": clean, "limit": 10})
+    r = enqueue_crm_get("/api/v3/search/phone", params={"phone": clean, "limit": 10})
+    
+    if r["status"] == "queue_full":
+        return "⌛ Очередь перегружена. Попробуйте позже."
+    elif r["status"] == "timeout":
+        return "⏰ Таймаут запроса. Попробуйте снова."
+    elif r["status"] != "ok":
+        return f"❌ Ошибка: {r.get('error', 'Неизвестная ошибка')}"
+    
+    resp = r["result"]
     
     if isinstance(resp, str):
         return resp
@@ -687,7 +597,7 @@ def search_by_phone(phone: str):
     try:
         data = resp.json()
     except:
-        return f"❌ Не удалось распарсить ответ"
+        return "❌ Не удалось обработать ответ сервера."
     
     if not isinstance(data, list) or not data:
         return f"⚠️ Ничего не найдено по номеру {phone}"
@@ -699,12 +609,15 @@ def search_by_phone(phone: str):
             result += f"\n   👤 {p.get('snf','')}"
         if p.get('iin'):
             result += f"\n   🧾 ИИН: {p.get('iin','')}"
+        if p.get('source'):
+            result += f"\n   📍 Источник: {p.get('source')}"
         results.append(result)
     
     return "\n\n".join(results)
 
 def search_by_fio(text: str):
-    logger.info(f"🔍 Поиск по ФИО: {text}")
+    """Поиск по ФИО"""
+    print(f"[SEARCH FIO] 🔍 Запрос: {text}")
     
     if text.startswith(",,"):
         parts = text[2:].strip().split()
@@ -722,7 +635,16 @@ def search_by_fio(text: str):
             params["father_name"] = parts[2]
         q = {**params, "smart_mode": "true", "limit": 10}
     
-    resp = crm_get("/api/v3/search/fio", params=q)
+    r = enqueue_crm_get("/api/v3/search/fio", params=q)
+    
+    if r["status"] == "queue_full":
+        return "⌛ Очередь перегружена. Попробуйте позже."
+    elif r["status"] == "timeout":
+        return "⏰ Таймаут запроса. Попробуйте снова."
+    elif r["status"] != "ok":
+        return f"❌ Ошибка: {r.get('error', 'Неизвестная ошибка')}"
+    
+    resp = r["result"]
     
     if isinstance(resp, str):
         return resp
@@ -734,7 +656,7 @@ def search_by_fio(text: str):
     try:
         data = resp.json()
     except:
-        return f"❌ Не удалось распарсить ответ"
+        return "❌ Не удалось обработать ответ сервера."
     
     if not isinstance(data, list) or not data:
         return "⚠️ Ничего не найдено."
@@ -748,132 +670,276 @@ def search_by_fio(text: str):
             result += f"\n   📅 Дата рождения: {p.get('birthday','')}"
         if p.get('phone_number'):
             result += f"\n   📱 Телефон: {p.get('phone_number','')}"
+        if p.get('source'):
+            result += f"\n   📍 Источник: {p.get('source')}"
         results.append(result)
     
     return "📌 Результаты поиска по ФИО:\n\n" + "\n".join(results)
 
-# ================== 7. FLASK РОУТИНГ ==================
+# ================== 9. FLASK APP ==================
+app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+active_sessions: Dict[int, Dict[str, float]] = {}
+SESSION_TTL = 3600
+
+def load_allowed_users():
+    """Загружаем список разрешенных пользователей"""
+    global ALLOWED_USER_IDS
+    try:
+        print(f"[AUTH] Загружаем разрешенных пользователей из: {ALLOWED_USERS_URL}")
+        response = requests.get(ALLOWED_USERS_URL, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            ALLOWED_USER_IDS = [int(i) for i in data.get("allowed_users", [])]
+            print(f"[AUTH] ✅ Загружено {len(ALLOWED_USER_IDS)} разрешенных пользователей")
+        else:
+            print(f"[AUTH] ⚠️ Не удалось загрузить, статус: {response.status_code}")
+            ALLOWED_USER_IDS = [0]
+    except Exception as e:
+        print(f"[AUTH] ❌ Ошибка загрузки: {e}")
+        ALLOWED_USER_IDS = [0]
+
+@app.route('/api/session/start', methods=['POST'])
+def start_session():
+    """Начало сессии"""
+    load_allowed_users()
+    
+    data = request.json
+    user_id = data.get('telegram_user_id')
+    
+    if not user_id:
+        return jsonify({"error": "Нет Telegram ID"}), 400
+    
+    try:
+        user_id_int = int(user_id)
+        if user_id_int not in ALLOWED_USER_IDS:
+            print(f"[SESSION] ❌ Отказано в доступе для ID: {user_id_int}")
+            return jsonify({"error": "Нет доступа"}), 403
+        
+        now = time.time()
+        existing = active_sessions.get(user_id_int)
+        
+        if existing and (now - existing["created"]) < SESSION_TTL:
+            return jsonify({"error": "Сессия уже активна."}), 403
+        
+        if existing and (now - existing["created"]) >= SESSION_TTL:
+            del active_sessions[user_id_int]
+        
+        session_token = f"{user_id_int}-{int(now)}-{random.randint(1000,9999)}"
+        active_sessions[user_id_int] = {"token": session_token, "created": now}
+        
+        print(f"[SESSION] 🔑 Активирована сессия для {user_id_int}")
+        return jsonify({"session_token": session_token})
+        
+    except ValueError:
+        return jsonify({"error": "Неверный Telegram ID"}), 400
+    except Exception as e:
+        print(f"[SESSION] ❌ Ошибка: {e}")
+        return jsonify({"error": "Внутренняя ошибка"}), 500
+
+@app.before_request
+def validate_session():
+    """Валидация сессии"""
+    if request.path == "/api/search" and request.method == "POST":
+        data = request.json or {}
+        uid = data.get("telegram_user_id")
+        token = data.get("session_token")
+        
+        if not uid or not token:
+            return jsonify({"error": "Не указаны учетные данные"}), 403
+        
+        try:
+            uid_int = int(uid)
+            session = active_sessions.get(uid_int)
+            if not session:
+                return jsonify({"error": "Сессия не найдена."}), 403
+            if session["token"] != token:
+                return jsonify({"error": "Сессия недействительна."}), 403
+            if time.time() - session["created"] > SESSION_TTL:
+                del active_sessions[uid_int]
+                return jsonify({"error": "Сессия истекла."}), 403
+        except ValueError:
+            return jsonify({"error": "Неверный Telegram ID"}), 400
+
 @app.route('/api/search', methods=['POST'])
 def api_search():
     """Основной поисковый эндпоинт"""
     data = request.json
-    query = data.get('query', '').strip()
+    user_id = data.get('telegram_user_id')
     
+    if not user_id:
+        return jsonify({"error": "Ошибка авторизации."}), 403
+    
+    query = data.get('query', '').strip()
     if not query:
         return jsonify({"error": "Пустой запрос"}), 400
     
-    logger.info(f"\n{'='*50}")
-    logger.info(f"🔍 Поиск: {query}")
-    logger.info(f"{'='*50}")
+    print(f"[SEARCH] Пользователь {user_id} ищет: {query[:50]}...")
     
-    try:
-        if query.isdigit() and len(query) == 12:
-            reply = search_by_iin(query)
-        elif query.startswith(("+", "8", "7")):
-            reply = search_by_phone(query)
-        else:
-            reply = search_by_fio(query)
-        
-        logger.info(f"✅ Ответ готов ({len(reply)} символов)")
-        logger.info(f"{'='*50}")
-        
-        return jsonify({"result": reply})
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка поиска: {e}")
-        return jsonify({"error": "Внутренняя ошибка сервера"}), 500
+    if query.isdigit() and len(query) == 12:
+        reply = search_by_iin(query)
+    elif query.startswith(("+", "8", "7")):
+        reply = search_by_phone(query)
+    else:
+        reply = search_by_fio(query)
+    
+    return jsonify({"result": reply})
+
+@app.route('/api/queue-status', methods=['GET'])
+def queue_status():
+    """Статус очереди"""
+    return jsonify({
+        "queue_size": crm_queue.qsize(),
+        "queue_max": 50,
+        "active_sessions": len(pw_sessions),
+        "active_flask_sessions": len(active_sessions)
+    })
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Проверка здоровья сервиса"""
-    try:
-        # Быстрый тест
-        result = pw_worker.submit_task("test_connection", {}, timeout=10)
-        
-        info = {}
-        try:
-            info_result = pw_worker.submit_task("get_info", {}, timeout=5)
-            if info_result.get("success"):
-                info = info_result.get("data", {})
-        except:
-            pass
-        
-        test_passed = result.get("success", False) and result.get("data", {}).get("test_passed", False)
-        
-        return jsonify({
-            "status": "ok" if test_passed else "error",
-            "worker_running": pw_worker.is_running,
-            "worker_initialized": pw_worker.init_event.is_set(),
-            "test_passed": test_passed,
-            "worker_info": info,
-            "timestamp": datetime.now().isoformat()
-        })
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
-        }), 500
+    with PW_SESSIONS_LOCK:
+        session_count = len(pw_sessions)
+    
+    return jsonify({
+        "status": "ok" if session_count > 0 else "error",
+        "sessions": session_count,
+        "queue": crm_queue.qsize(),
+        "queue_max": 50,
+        "active_flask_sessions": len(active_sessions),
+        "allowed_users": len(ALLOWED_USER_IDS),
+        "memory_usage": "good"  # Упрощенная проверка
+    })
 
-@app.route('/api/debug/test', methods=['GET'])
-def debug_test():
-    """Тестовый запрос"""
-    iin = request.args.get('iin', '931229400494')
+@app.route('/api/debug/sessions', methods=['GET'])
+def debug_sessions():
+    """Отладка сессий"""
+    auth_header = request.headers.get('Authorization')
+    if auth_header != f"Bearer {SECRET_TOKEN}":
+        return jsonify({"error": "Forbidden"}), 403
+    
+    with PW_SESSIONS_LOCK:
+        sessions_info = []
+        for s in pw_sessions:
+            sessions_info.append({
+                "username": s.get("username"),
+                "fingerprint": s.get("fingerprint", "")[:20] + "...",
+                "cookies_count": len(s.get("cookies", {})),
+                "important_cookies": {
+                    name: (s.get("cookies", {}).get(name, "")[:20] + "..." if name in s.get("cookies", {}) else "НЕТ")
+                    for name in ['cf_clearance', 'aegis_session', 'access_token']
+                },
+                "created_at": s.get("created_at"),
+                "age_seconds": int(time.time()) - s.get("created_at", 0),
+                "last_used": s.get("last_used", 0)
+            })
+    
+    return jsonify({
+        "active_sessions_count": len(pw_sessions),
+        "sessions": sessions_info,
+        "queue_size": crm_queue.qsize(),
+        "active_flask_sessions": len(active_sessions)
+    })
+
+@app.route('/api/debug/init-sessions', methods=['POST'])
+def debug_init_sessions():
+    """Инициализация сессий"""
+    auth_header = request.headers.get('Authorization')
+    if auth_header != f"Bearer {SECRET_TOKEN}":
+        return jsonify({"error": "Forbidden"}), 403
     
     try:
-        result = pw_worker.submit_task("api_request", {
-            "endpoint": "/api/v3/search/iin",
-            "params": {"iin": iin}
-        }, timeout=20)
+        success = init_token_pool()
+        with PW_SESSIONS_LOCK:
+            session_count = len(pw_sessions)
         
         return jsonify({
-            "success": result.get("success", False),
-            "data": result.get("data"),
-            "error": result.get("error")
+            "success": success,
+            "sessions": session_count
         })
-        
     except Exception as e:
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
 
-# ================== 8. ЗАПУСК ==================
-if __name__ == "__main__":
-    print("\n" + "=" * 60)
-    print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА (ОПТИМИЗИРОВАННЫЙ)")
-    print("=" * 60)
-    print("Архитектура: Один поток Playwright, оптимизированная память")
-    print("Исправлено: EPIPE ошибки, перегрузка памяти")
-    print("Логи: pena_api.log")
-    print("=" * 60)
+# ================== 10. КОРРЕКТНОЕ ЗАВЕРШЕНИЕ ==================
+def cleanup_playwright():
+    """Корректная очистка Playwright"""
+    print("\n🧹 Корректная очистка Playwright...")
     
-    # Запускаем Playwright worker
-    pw_worker.start()
+    # Закрываем все сессии
+    with PW_SESSIONS_LOCK:
+        for session in pw_sessions:
+            try:
+                if session.get("browser"):
+                    session["browser"].close()
+            except:
+                pass
     
-    # Ждем инициализации
-    print("\n⏳ Ожидаем инициализации Playwright...")
-    initialized = pw_worker.init_event.wait(timeout=40)
+    # Останавливаем Playwright
+    try:
+        if pw_manager._pw:
+            pw_manager._pw.stop()
+    except:
+        pass
     
-    if initialized:
-        print("✅ Playwright инициализирован")
+    # Очищаем временные файлы
+    import subprocess
+    subprocess.run(["pkill", "-f", "playwright"], capture_output=True)
+    subprocess.run(["pkill", "-f", "chrome"], capture_output=True)
+    
+    print("✅ Playwright очищен")
+
+def signal_handler(signum, frame):
+    """Обработчик сигналов для корректного завершения"""
+    print(f"\n📴 Получен сигнал {signum}, завершаем работу...")
+    cleanup_playwright()
+    sys.exit(0)
+
+# Регистрируем обработчики сигналов
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
+# ================== 11. ЗАПУСК СЕРВЕРА ==================
+print("\n" + "=" * 60)
+print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА (ОПТИМИЗИРОВАННЫЙ)")
+print("=" * 60)
+print("Архитектура: Упрощенная, с очередью запросов")
+print("Память: Оптимизирована для малых ресурсов")
+print("Исправлено: EPIPE ошибки, перегрузка памяти")
+print("=" * 60)
+
+# Загружаем разрешенных пользователей
+load_allowed_users()
+
+# Инициализируем пул сессий
+time.sleep(2)
+init_success = init_token_pool()
+
+if not init_success:
+    print("\n⚠️ ВНИМАНИЕ: Не удалось создать сессии!")
+else:
+    print("\n✅ СЕРВЕР ГОТОВ К РАБОТЕ!")
+
+def cleanup_expired_sessions():
+    """Очистка просроченных сессий Flask"""
+    while True:
+        now = time.time()
+        expired = [uid for uid, s in active_sessions.items() if now - s["created"] > SESSION_TTL]
+        for uid in expired:
+            del active_sessions[uid]
         
-        # Тестовый запрос
-        try:
-            test_result = pw_worker.submit_task("test_connection", {}, timeout=15)
-            if test_result.get("success") and test_result.get("data", {}).get("test_passed"):
-                print("✅ Тестовый запрос успешен")
-            else:
-                print(f"⚠️ Тестовый запрос не прошел: {test_result}")
-        except Exception as e:
-            print(f"⚠️ Ошибка тестового запроса: {e}")
-    else:
-        print("❌ Таймаут инициализации Playwright!")
-    
-    print("\n🌐 Flask сервер запускается...")
-    print("📡 Health check: GET /api/health")
-    print("🔍 Поиск: POST /api/search")
-    print("=" * 60)
+        time.sleep(300)
+
+Thread(target=cleanup_expired_sessions, daemon=True).start()
+
+if __name__ == "__main__":
+    print(f"\n🌐 Сервер запущен на порту 5000")
+    print(f"📋 Проверка: GET /api/health")
+    print(f"📊 Статус очереди: GET /api/queue-status")
+    print("\n✅ Готов к работе с Telegram мини-приложением!")
     
     # Запускаем Flask
     from werkzeug.serving import run_simple
