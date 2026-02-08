@@ -8,18 +8,19 @@ import traceback
 from threading import Thread, Lock
 from typing import Optional, Dict, List
 from queue import Queue
+from urllib.parse import urlencode
 
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from playwright.sync_api import sync_playwright, Browser, Page
+from playwright.sync_api import sync_playwright, Page
 
 # ================== 1. НАСТРОЙКИ ==================
 BOT_TOKEN = "8545598161:AAGM6HtppAjUOuSAYH0mX5oNcPU0SuO59N4"
 ALLOWED_USERS_URL = "https://raw.githubusercontent.com/RR-alt-pixel/test/refs/heads/main/allowed_ids.json"
 ALLOWED_USER_IDS: List[int] = [0]
 
-BASE_URL = "https://causa.world"
+BASE_URL = "https://pena.rest"
 LOGIN_PAGE = f"{BASE_URL}/auth/login"
 API_BASE = BASE_URL
 SECRET_TOKEN = "Refresh-Server-Key-2025-Oct-VK44"
@@ -28,42 +29,17 @@ LOGIN_SELECTOR = 'input[placeholder="Логин"]'
 PASSWORD_SELECTOR = 'input[placeholder="Пароль"]'
 SIGN_IN_BUTTON_SELECTOR = 'button[type="submit"]'
 
-TOKENS_FILE = "tokens.json"
+TOKENS_FILE = "tokens.json"   # оставляем, но ниже сохраняем только сериализуемые метаданные
 TOKENS_LOCK = Lock()
 
 # ================== 2. АККАУНТЫ ==================
 accounts = [
-  {"username": "king6", "password": "fM7575fM"},
-  {"username": "romb3", "password": "Wy7777Wy"},
-  {"username": "shok4", "password": "pC9191pC"},
-  {"username": "king1", "password": "Wl6565Wl"},
-  {"username": "romb8", "password": "wI8787wI"},
-  {"username": "king9", "password": "Rv7474Rv"},
-  {"username": "shok2", "password": "qI7777qI"},
-  {"username": "romb1", "password": "Nb8181Nb"},
-  {"username": "king4", "password": "pS6767pS"},
-  {"username": "romb6", "password": "vU8686vU"},
-  {"username": "shok5", "password": "Qz8787Qz"},
-  {"username": "king10", "password": "fF8888fF"},
-  {"username": "romb10", "password": "hC7171hC"},
-  {"username": "king2", "password": "gL7676gL"},
-  {"username": "shok1", "password": "Sn8888Sn"},
-  {"username": "romb4", "password": "LS6666LS"},
-  {"username": "king7", "password": "Lq7171Lq"},
-  {"username": "romb7", "password": "Gf8282Gf"},
-  {"username": "king5", "password": "Pr6868Pr"},
-  {"username": "romb9", "password": "Xh6767Xh"},
-  {"username": "shok3", "password": "Ph7676Ph"},
-  {"username": "romb5", "password": "Fj7474Fj"},
-  {"username": "king8", "password": "gI6565gI"},
-  {"username": "romb2", "password": "fS7373fS"},
-  {"username": "king3", "password": "Yu8787Yu"},
+  {"username": "from1", "password": "2255NNbb"},
 ]
 
-
-# ================== 3. ПУЛ ТОКЕНОВ ==================
-token_pool: List[Dict] = []
-token_cycle = None
+# ================== 3. ПУЛ PLAYWRIGHT СЕССИЙ ==================
+pw_sessions: List[Dict] = []          # живые браузерные сессии (browser/context/page)
+pw_cycle = None
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
@@ -71,49 +47,78 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
 ]
 
+# Playwright должен жить постоянно (иначе fingerprint/сессия умрут)
+_PW = None
+_PW_LOCK = Lock()
+
+class ResponseLike:
+    def __init__(self, status_code: int, text: str, json_data=None):
+        self.status_code = status_code
+        self.text = text
+        self._json_data = json_data
+
+    def json(self):
+        if self._json_data is None:
+            raise ValueError("No JSON")
+        return self._json_data
+
+def _ensure_playwright_started():
+    global _PW
+    with _PW_LOCK:
+        if _PW is None:
+            _PW = sync_playwright().start()
+            print("[PW] ✅ Playwright started")
+
+# ================== 3.1 TOKENS FILE (оставляем) ==================
 def load_tokens_from_file() -> List[Dict]:
-    global token_pool, token_cycle
     try:
         if os.path.exists(TOKENS_FILE):
             with open(TOKENS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    token_pool = data
-                    token_cycle = itertools.cycle(token_pool) if token_pool else None
-                    print(f"[TOKENS] 🔁 Загружено {len(token_pool)} токенов.")
-                    return token_pool
+                    print(f"[TOKENS] 🔁 Загружено {len(data)} записей (метаданные).")
+                    return data
     except Exception as e:
         print(f"[TOKENS ERROR] {e}")
         traceback.print_exc()
-    token_pool = []
-    token_cycle = None
     return []
 
 def save_tokens_to_file():
-    global token_pool
     try:
         with TOKENS_LOCK:
             tmp = TOKENS_FILE + ".tmp"
+            meta = []
+            for s in pw_sessions:
+                meta.append({
+                    "username": s.get("username"),
+                    "user_agent": s.get("user_agent"),
+                    "csrf_token": s.get("csrf_token"),
+                    "cookie_header": s.get("cookie_header"),
+                    "time": s.get("time"),
+                })
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(token_pool, f, ensure_ascii=False, indent=2)
+                json.dump(meta, f, ensure_ascii=False, indent=2)
             os.replace(tmp, TOKENS_FILE)
-            print(f"[TOKENS] 💾 Сохранено {len(token_pool)} токенов.")
+            print(f"[TOKENS] 💾 Сохранено {len(meta)} записей (метаданные).")
     except Exception as e:
         print(f"[TOKENS ERROR] {e}")
         traceback.print_exc()
 
-# ================== 4. PLAYWRIGHT LOGIN ==================
-def login_crm_playwright(username: str, password: str, p, show_browser: bool = False) -> Optional[Dict]:
+# ================== 4. PLAYWRIGHT LOGIN (ЖИВАЯ СЕССИЯ) ==================
+def login_crm_playwright(username: str, password: str, show_browser: bool = False) -> Optional[Dict]:
+    _ensure_playwright_started()
     browser = None
     try:
         print(f"[PLW] 🔵 Вход под {username}...")
-        browser = p.chromium.launch(
+        browser = _PW.chromium.launch(
             headless=not show_browser,
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
             timeout=60000
         )
-        context = browser.new_context(user_agent=random.choice(USER_AGENTS))
+        ua = random.choice(USER_AGENTS)
+        context = browser.new_context(user_agent=ua)
         page: Page = context.new_page()
+
         page.goto(LOGIN_PAGE, wait_until="load", timeout=30000)
         page.fill(LOGIN_SELECTOR, username)
         time.sleep(0.4)
@@ -124,120 +129,192 @@ def login_crm_playwright(username: str, password: str, p, show_browser: bool = F
 
         cookies = context.cookies()
         cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+        csrf = next((c["value"] for c in cookies if c["name"] == "csrf_token"), "")
         user_agent = page.evaluate("() => navigator.userAgent")
 
         if cookie_header:
-            token = {
+            sess = {
                 "username": username,
+                "password": password,      # чтобы refresh работал без поиска в accounts
+                "browser": browser,
+                "context": context,
+                "page": page,
                 "cookie_header": cookie_header,
-                "user_agent": user_agent,
+                "csrf_token": csrf,
+                "user_agent": user_agent or ua,
                 "time": int(time.time())
             }
             print(f"[PLW] ✅ {username} авторизован.")
-            return token
+            return sess
+
+        # если куки не получили — закрываем
+        try:
+            browser.close()
+        except Exception:
+            pass
         return None
+
     except Exception as e:
         print(f"[PLW ERROR] {username}: {e}")
+        traceback.print_exc()
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
         return None
-    finally:
-        if browser:
-            browser.close()
 
-# ================== 5. ПУЛ ТОКЕНОВ ИНИЦИАЛИЗАЦИЯ ==================
+# ================== 5. ПУЛ СЕССИЙ ИНИЦИАЛИЗАЦИЯ ==================
 def init_token_pool_playwright(show_browser: bool = False):
-    global token_pool, token_cycle
+    global pw_sessions, pw_cycle
+    _ensure_playwright_started()
+
+    # файл читаем, но реальная защита теперь держится на живых pages,
+    # поэтому всегда поднимаем pw_sessions (иначе fingerprint не будет).
     load_tokens_from_file()
-    if token_pool:
-        token_cycle = itertools.cycle(token_pool)
-        print(f"[POOL] 🟢 Используем сохранённые токены.")
-        return
 
-    print("[POOL] 🔄 Логин через Playwright...")
-    token_pool = []
-    try:
-        with sync_playwright() as p:
-            for acc in accounts:
-                tok = login_crm_playwright(acc["username"], acc["password"], p, show_browser)
-                if tok:
-                    token_pool.append(tok)
-    except Exception as e:
-        print(f"[POOL ERROR] {e}")
-    if token_pool:
-        token_cycle = itertools.cycle(token_pool)
+    print("[POOL] 🔄 Логин через Playwright (живые сессии)...")
+    pw_sessions = []
+    for acc in accounts:
+        tok = login_crm_playwright(acc["username"], acc["password"], show_browser=show_browser)
+        if tok:
+            pw_sessions.append(tok)
+
+    if pw_sessions:
+        pw_cycle = itertools.cycle(pw_sessions)
         save_tokens_to_file()
-        print(f"[POOL] ✅ Загружено {len(token_pool)} токенов.")
+        print(f"[POOL] ✅ Загружено {len(pw_sessions)} сессий.")
+        print(f"[PW] sessions ready: {len(pw_sessions)}")
     else:
-        print("[POOL] ❌ Пустой пул токенов.")
+        pw_cycle = None
+        print("[POOL] ❌ Пустой пул сессий.")
 
-# ================== 6. TOKEN GETTER ==================
-def get_next_token() -> Optional[Dict]:
-    global token_pool, token_cycle
-    if not token_pool:
+# ================== 6. SESSION GETTER ==================
+def get_next_session() -> Optional[Dict]:
+    global pw_sessions, pw_cycle
+    if not pw_sessions:
         init_token_pool_playwright()
-        if not token_pool:
+        if not pw_sessions:
             return None
-    if token_cycle is None:
-        token_cycle = itertools.cycle(token_pool)
+    if pw_cycle is None:
+        pw_cycle = itertools.cycle(pw_sessions)
     try:
-        token = next(token_cycle)
-        print(f"[POOL] 🔁 Используется токен {token['username']}")
-        return token
+        s = next(pw_cycle)
+        print(f"[POOL] 🔁 Используется сессия {s['username']}")
+        return s
     except StopIteration:
-        token_cycle = itertools.cycle(token_pool)
-        token = next(token_cycle)
-        print(f"[POOL] ♻️ Перезапуск цикла, выбран {token['username']}")
-        return token
+        pw_cycle = itertools.cycle(pw_sessions)
+        s = next(pw_cycle)
+        print(f"[POOL] ♻️ Перезапуск цикла, выбран {s['username']}")
+        return s
 
-# ================== 7. CRM GET ==================
+# ================== 7. REFRESH СЕССИИ ==================
 def refresh_token_for_username(username: str) -> Optional[Dict]:
-    global token_pool, token_cycle
+    global pw_sessions, pw_cycle
     try:
-        with sync_playwright() as p:
+        # находим старую сессию
+        old = None
+        for s in pw_sessions:
+            if s.get("username") == username:
+                old = s
+                break
+
+        if not old:
+            # если не нашли — ищем в accounts
             acc = next(a for a in accounts if a["username"] == username)
-            new_t = login_crm_playwright(acc["username"], acc["password"], p)
-        if new_t:
-            for i, t in enumerate(token_pool):
-                if t["username"] == username:
-                    token_pool[i] = new_t
+            new_sess = login_crm_playwright(acc["username"], acc["password"])
+        else:
+            new_sess = login_crm_playwright(old["username"], old["password"])
+
+        if new_sess:
+            # закрываем старую
+            if old:
+                try:
+                    old["browser"].close()
+                except Exception:
+                    pass
+
+            # заменяем/добавляем
+            for i, s in enumerate(pw_sessions):
+                if s.get("username") == username:
+                    pw_sessions[i] = new_sess
                     break
             else:
-                token_pool.append(new_t)
-            token_cycle = itertools.cycle(token_pool)
+                pw_sessions.append(new_sess)
+
+            pw_cycle = itertools.cycle(pw_sessions)
             save_tokens_to_file()
-            print(f"[AUTH] 🔁 {username} token refreshed.")
-            return new_t
+            print(f"[AUTH] 🔁 {username} session refreshed.")
+            return new_sess
+
     except Exception as e:
         print(f"[AUTH ERROR] {e}")
+        traceback.print_exc()
     return None
 
-def crm_get(endpoint: str, params: dict = None):
-    token = get_next_token()
-    if not token:
-        return "❌ Нет токенов CRM."
-    headers = {
-        "Accept": "application/json, text/plain, */*",
-        "User-Agent": token.get("user_agent", random.choice(USER_AGENTS)),
-        "Cookie": token.get("cookie_header", "")
-    }
-
-    if "/by-address" in endpoint:
-        headers["Referer"] = f"{BASE_URL}/person-search"
+# ================== 7.1 FETCH ВНУТРИ PLAYWRIGHT PAGE ==================
+def _build_url(endpoint: str, params: dict = None) -> str:
+    # endpoint может быть "/api/..." или "https://..."
+    if endpoint.startswith("http"):
+        url = endpoint
     else:
-        headers["Referer"] = f"{BASE_URL}/search"
+        url = API_BASE + endpoint
 
-    url = endpoint if endpoint.startswith("http") else API_BASE + endpoint
+    if params:
+        qs = urlencode(params, doseq=True)
+        if "?" in url:
+            url = url + "&" + qs
+        else:
+            url = url + "?" + qs
+    return url
+
+def crm_get(endpoint: str, params: dict = None):
+    sess = get_next_session()
+    if not sess:
+        return "❌ Нет сессий Playwright."
+
+    page: Page = sess["page"]
+    url = _build_url(endpoint, params=params)
+
+    # fetch делаем внутри браузера, чтобы прошёл device fingerprint
+    js = """
+    async (url) => {
+      try {
+        const r = await fetch(url, { method: "GET", credentials: "include" });
+        const txt = await r.text();
+        let jsn = null;
+        try { jsn = JSON.parse(txt); } catch (e) {}
+        return { ok: r.ok, status: r.status, text: txt, json: jsn };
+      } catch (e) {
+        return { ok: false, status: 0, text: String(e), json: null, error: String(e) };
+      }
+    }
+    """
+
     try:
-        r = requests.get(url, headers=headers, params=params, timeout=20)
-        if r.status_code in (401, 403):
-            uname = token["username"]
-            print(f"[AUTH] {uname} → 401/403 → обновляем токен")
-            new_t = refresh_token_for_username(uname)
-            if new_t:
-                headers["Cookie"] = new_t["cookie_header"]
-                r = requests.get(url, headers=headers, params=params, timeout=20)
-        return r
+        out = page.evaluate(js, url)
+
+        status = int(out.get("status", 0) or 0)
+        txt = out.get("text", "") or ""
+        jsn = out.get("json", None)
+
+        # если 401/403 — пробуем refresh и повтор 1 раз
+        if status in (401, 403):
+            uname = sess["username"]
+            print(f"[AUTH] {uname} → 401/403 → обновляем сессию")
+            new_sess = refresh_token_for_username(uname)
+            if new_sess:
+                page2: Page = new_sess["page"]
+                out = page2.evaluate(js, url)
+                status = int(out.get("status", 0) or 0)
+                txt = out.get("text", "") or ""
+                jsn = out.get("json", None)
+
+        return ResponseLike(status_code=status, text=txt, json_data=jsn)
+
     except Exception as e:
-        return f"❌ Ошибка CRM: {e}"
+        return f"❌ Ошибка CRM(fetch): {e}"
+
 # ================== 8. ОЧЕРЕДЬ CRM ==================
 crm_queue = Queue()
 RESULT_TIMEOUT = 45
@@ -294,18 +371,25 @@ def periodic_fetch():
 
 # ================== 10. ПОИСК ==================
 def search_by_iin(iin: str):
-    r = enqueue_crm_get("/api/v2/person-search/by-iin", params={"iin": iin})
+    r = enqueue_crm_get("/api/v3/search/iin", params={"iin": iin})
     if r["status"] != "ok":
         pos = r.get("queue_position", "?")
         return f"⌛ Ваш запрос в очереди (позиция {pos})."
+
     resp = r["result"]
     if isinstance(resp, str):
         return resp
+
     if resp.status_code == 404:
         return "⚠️ Ничего не найдено по ИИН."
     if resp.status_code != 200:
         return f"❌ Ошибка {resp.status_code}: {resp.text}"
-    p = resp.json()
+
+    data = resp.json()
+    if not isinstance(data, list) or not data:
+        return "⚠️ Ничего не найдено по ИИН."
+    p = data[0]
+
     return (
         f"👤 <b>{p.get('snf','')}</b>\n"
         f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
@@ -319,21 +403,26 @@ def search_by_phone(phone: str):
     clean = ''.join(filter(str.isdigit, phone))
     if clean.startswith("8"):
         clean = "7" + clean[1:]
-    r = enqueue_crm_get("/api/v2/person-search/by-phone", params={"phone": clean})
+
+    r = enqueue_crm_get("/api/v3/search/phone", params={"phone": clean, "limit": 100})
     if r["status"] != "ok":
         pos = r.get("queue_position", "?")
         return f"⌛ Ваш запрос в очереди (позиция {pos})."
+
     resp = r["result"]
     if isinstance(resp, str):
         return resp
+
     if resp.status_code == 404:
         return f"⚠️ Ничего не найдено по номеру {phone}"
     if resp.status_code != 200:
         return f"❌ Ошибка {resp.status_code}: {resp.text}"
+
     data = resp.json()
-    if not data:
+    if not isinstance(data, list) or not data:
         return f"⚠️ Ничего не найдено по номеру {phone}"
-    p = data[0] if isinstance(data, list) else data
+    p = data[0]
+
     return (
         f"👤 <b>{p.get('snf','')}</b>\n"
         f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
@@ -348,7 +437,8 @@ def search_by_fio(text: str):
         parts = text[2:].strip().split()
         if len(parts) < 2:
             return "⚠️ Укажите имя и отчество после ',,'"
-        q = {"name": parts[0], "father_name": " ".join(parts[1:]), "smart_mode": "false", "limit": 10}
+        q = {"name": parts[0], "father_name": " ".join(parts[1:]), "smart_mode": "true", "limit": 100}
+        # в таком режиме фамилия не используется (как у тебя было в v2 логике)
     else:
         parts = text.split(" ")
         params = {}
@@ -358,23 +448,26 @@ def search_by_fio(text: str):
             params["name"] = parts[1]
         if len(parts) >= 3 and parts[2] != "":
             params["father_name"] = parts[2]
-        q = {**params, "smart_mode": "false", "limit": 10}
-    r = enqueue_crm_get("/api/v2/person-search/smart", params=q)
+        q = {**params, "smart_mode": "true", "limit": 100}
+
+    r = enqueue_crm_get("/api/v3/search/fio", params=q)
     if r["status"] != "ok":
         pos = r.get("queue_position", "?")
         return f"⌛ Ваш запрос в очереди (позиция {pos})."
+
     resp = r["result"]
     if isinstance(resp, str):
         return resp
+
     if resp.status_code == 404:
         return "⚠️ Ничего не найдено."
     if resp.status_code != 200:
         return f"❌ Ошибка {resp.status_code}: {resp.text}"
+
     data = resp.json()
-    if not data:
+    if not isinstance(data, list) or not data:
         return "⚠️ Ничего не найдено."
-    if isinstance(data, dict):
-        data = [data]
+
     results = []
     for i, p in enumerate(data[:10], start=1):
         results.append(
@@ -387,22 +480,7 @@ def search_by_fio(text: str):
     return "📌 Результаты поиска по ФИО:\n\n" + "\n".join(results)
 
 def search_by_address(address: str):
-    params = {"address": address, "exact_match": "false", "limit": 50}
-    r = enqueue_crm_get("/api/v2/person-search/by-address", params=params)
-    if r["status"] != "ok":
-        return "⌛ В очереди."
-    resp = r["result"]
-    if isinstance(resp, str):
-        return resp
-    if resp.status_code != 200:
-        return f"❌ Ошибка {resp.status_code}"
-    data = resp.json()
-    if isinstance(data, dict):
-        data = [data]
-    results = []
-    for i, p in enumerate(data[:10], start=1):
-        results.append(f"{i}. {p.get('snf','')} — {p.get('address','')}")
-    return "\n".join(results)
+    return "⚠️ Поиск по адресу на pena.rest (v3) не настроен. Скинь запрос из Network — добавлю."
 
 # ================== 11. FLASK + СЕССИИ ==================
 app = Flask(__name__)
@@ -423,17 +501,14 @@ def start_session():
     now = time.time()
     existing = active_sessions.get(user_id)
 
-    # Проверка: если уже есть активная — запрещаем повторный запуск
     if existing and (now - existing["created"]) < SESSION_TTL:
         print(f"[SESSION] ❌ Попытка перезапуска сессии {user_id}, отклонено.")
         return jsonify({"error": "Сессия уже активна. Повторите позже."}), 403
 
-    # Проверка: если старая сессия была — удаляем
     if existing and (now - existing["created"]) >= SESSION_TTL:
         del active_sessions[user_id]
         print(f"[SESSION] ⏰ Истекшая сессия {user_id} удалена")
 
-    # Создаём новую
     session_token = f"{user_id}-{int(now)}-{random.randint(1000,9999)}"
     active_sessions[user_id] = {
         "token": session_token,
@@ -442,7 +517,6 @@ def start_session():
 
     print(f"[SESSION] 🔑 Активирована новая сессия для {user_id}")
     return jsonify({"session_token": session_token})
-
 
 @app.before_request
 def validate_session():
@@ -455,7 +529,6 @@ def validate_session():
         if not session:
             return jsonify({"error": "Сессия не найдена. Авторизуйтесь заново."}), 403
 
-        # защита от второго устройства
         if session["token"] != token:
             print(f"[SESSION] ⚠️ Несовпадение токена: uid={uid}")
             return jsonify({"error": "Сессия недействительна. Вход возможен только с одного устройства."}), 403
@@ -486,6 +559,7 @@ def api_search():
         reply = search_by_address(query)
     else:
         reply = search_by_fio(query)
+
     return jsonify({"result": reply})
 
 @app.route('/api/queue-size', methods=['GET'])
