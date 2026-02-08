@@ -34,7 +34,7 @@ TOKENS_LOCK = Lock()
 
 # ================== 2. АККАУНТЫ ==================
 accounts = [
-  {"username": "from1", "password": "2255NNbb"},
+  {"username": "klon9", "password": "7755SSaa"},
 ]
 
 # ================== 3. ПУЛ PLAYWRIGHT СЕССИЙ ==================
