@@ -38,16 +38,12 @@ accounts = [
 ]
 
 # ================== 3. ПУЛ (метаданные) ==================
-# Важно: Page/Context/Browser теперь НЕ храним в main thread.
-# Здесь только метаданные + session_key, а реальные объекты живут внутри Playwright-thread.
 pw_sessions: List[Dict[str, Any]] = []
 pw_cycle = None
 PW_SESSIONS_LOCK = Lock()
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
 ]
 
 class ResponseLike:
@@ -68,7 +64,7 @@ def load_tokens_from_file() -> List[Dict]:
             with open(TOKENS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    print(f"[TOKENS] 🔁 Загружено {len(data)} записей (метаданные).")
+                    print(f"[TOKENS] 🔁 Загружено {len(data)} записей.")
                     return data
     except Exception as e:
         print(f"[TOKENS ERROR] {e}")
@@ -85,7 +81,7 @@ def save_tokens_to_file():
                     meta.append({
                         "username": s.get("username"),
                         "user_agent": s.get("user_agent"),
-                        "csrf_token": s.get("csrf_token"),
+                        "device_fingerprint": s.get("device_fingerprint"),
                         "cookie_header": s.get("cookie_header"),
                         "time": s.get("time"),
                         "session_key": s.get("session_key"),
@@ -93,7 +89,7 @@ def save_tokens_to_file():
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
             os.replace(tmp, TOKENS_FILE)
-            print(f"[TOKENS] 💾 Сохранено {len(meta)} записей (метаданные).")
+            print(f"[TOKENS] 💾 Сохранено {len(meta)} записей.")
     except Exception as e:
         print(f"[TOKENS ERROR] {e}")
         traceback.print_exc()
@@ -106,7 +102,6 @@ class PWManager:
         self.ready = Event()
         self.started = False
 
-        # Живут только в PW-thread:
         self._pw = None
         self._browser_by_key: Dict[str, Any] = {}
         self._context_by_key: Dict[str, Any] = {}
@@ -173,23 +168,91 @@ class PWManager:
             ua = random.choice(USER_AGENTS)
             browser = self._pw.chromium.launch(
                 headless=not show_browser,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled"
+                ],
                 timeout=60000
             )
-            context = browser.new_context(user_agent=ua)
+            
+            context = browser.new_context(
+                user_agent=ua,
+                viewport={"width": 1280, "height": 800},
+                locale="ru-RU",
+                timezone_id="Asia/Almaty",
+            )
+            
             page: Page = context.new_page()
+            
+            # Скрываем webdriver
+            page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            """)
 
-            page.goto(LOGIN_PAGE, wait_until="load", timeout=30000)
-            page.fill(LOGIN_SELECTOR, username)
-            page.wait_for_timeout(400)
-            page.fill(PASSWORD_SELECTOR, password)
-            page.wait_for_timeout(400)
-            page.click(SIGN_IN_BUTTON_SELECTOR)
+            # Переход и логин
+            print(f"[PLW] Переход на {LOGIN_PAGE}")
+            page.goto(LOGIN_PAGE, wait_until="networkidle", timeout=30000)
             page.wait_for_timeout(2000)
+            
+            page.fill(LOGIN_SELECTOR, username)
+            page.wait_for_timeout(500)
+            page.fill(PASSWORD_SELECTOR, password)
+            page.wait_for_timeout(500)
+            page.click(SIGN_IN_BUTTON_SELECTOR)
+            
+            # Ждём перенаправления
+            print(f"[PLW] Ожидание dashboard...")
+            try:
+                page.wait_for_url("**/dashboard**", timeout=15000)
+            except:
+                pass
+            
+            page.wait_for_timeout(3000)
+            page.wait_for_load_state("networkidle", timeout=10000)
 
+            # Получаем cookies
             cookies = context.cookies()
             cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
-            csrf = next((c["value"] for c in cookies if c["name"] == "csrf_token"), "")
+            
+            # КРИТИЧНО: Получаем Device Fingerprint из localStorage
+            device_fp = page.evaluate("""
+                () => {
+                    try {
+                        return localStorage.getItem('deviceFingerprint') || 
+                               sessionStorage.getItem('deviceFingerprint') ||
+                               '';
+                    } catch(e) {
+                        return '';
+                    }
+                }
+            """)
+            
+            # Если в localStorage нет, пробуем из cookie или генерируем
+            if not device_fp:
+                # Ищем в cookies
+                for c in cookies:
+                    if 'fingerprint' in c['name'].lower() or 'device' in c['name'].lower():
+                        device_fp = c['value']
+                        break
+            
+            # Если всё ещё нет, генерируем из canvas/webgl
+            if not device_fp:
+                device_fp = page.evaluate("""
+                    () => {
+                        // Простой fingerprint на основе canvas
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        ctx.textBaseline = 'top';
+                        ctx.font = '14px Arial';
+                        ctx.fillText('FP', 2, 2);
+                        return canvas.toDataURL().slice(-64);
+                    }
+                """)
+            
             user_agent = page.evaluate("() => navigator.userAgent") or ua
 
             if not cookie_header:
@@ -207,15 +270,18 @@ class PWManager:
             self._session_meta_by_key[session_key] = {
                 "username": username,
                 "user_agent": user_agent,
-                "csrf_token": csrf,
+                "device_fingerprint": device_fp,
                 "cookie_header": cookie_header,
                 "time": int(time.time()),
             }
 
             print(f"[PLW] ✅ {username} авторизован. key={session_key}")
+            print(f"[PLW] Device FP: {device_fp[:32]}...")
             return {"ok": True, "session_key": session_key, "meta": self._session_meta_by_key[session_key]}
 
         except Exception as e:
+            print(f"[PLW] ❌ Ошибка логина: {e}")
+            traceback.print_exc()
             try:
                 if browser:
                     browser.close()
@@ -270,13 +336,29 @@ class PWManager:
             return {"ok": False, "error": "missing_key_or_url"}
 
         page = self._page_by_key.get(key)
-        if not page:
+        meta = self._session_meta_by_key.get(key)
+        if not page or not meta:
             return {"ok": False, "error": "page_not_found_for_key"}
 
+        device_fp = meta.get("device_fingerprint", "")
+
+        # КРИТИЧНО: Добавляем x-device-fingerprint в заголовки
         js = """
-        async (url) => {
+        async (args) => {
+          const { url, deviceFp } = args;
           try {
-            const r = await fetch(url, { method: "GET", credentials: "include" });
+            const headers = {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json',
+              'x-device-fingerprint': deviceFp
+            };
+            
+            const r = await fetch(url, { 
+              method: "GET", 
+              credentials: "include",
+              headers: headers
+            });
+            
             const txt = await r.text();
             let jsn = null;
             try { jsn = JSON.parse(txt); } catch (e) {}
@@ -286,7 +368,7 @@ class PWManager:
           }
         }
         """
-        out = page.evaluate(js, url)
+        out = page.evaluate(js, {"url": url, "deviceFp": device_fp})
         return {"ok": True, "out": out}
 
 pw_manager = PWManager()
@@ -299,7 +381,7 @@ def init_token_pool_playwright(show_browser: bool = False):
 
     load_tokens_from_file()
 
-    print("[POOL] 🔄 Логин через Playwright (живые сессии, строго один thread)...")
+    print("[POOL] 🔄 Логин через Playwright...")
     resp = pw_manager._rpc("init_pool", {"show_browser": show_browser}, timeout=120)
 
     if not resp.get("ok"):
@@ -316,7 +398,7 @@ def init_token_pool_playwright(show_browser: bool = False):
             "username": meta.get("username"),
             "password": next((a["password"] for a in accounts if a["username"] == meta.get("username")), None),
             "user_agent": meta.get("user_agent"),
-            "csrf_token": meta.get("csrf_token"),
+            "device_fingerprint": meta.get("device_fingerprint"),
             "cookie_header": meta.get("cookie_header"),
             "time": meta.get("time"),
             "session_key": item.get("session_key"),
@@ -336,7 +418,6 @@ def get_next_session() -> Optional[Dict]:
     global pw_sessions, pw_cycle
     with PW_SESSIONS_LOCK:
         if not pw_sessions:
-            # Поднимем пул синхронно (важно для первых запросов)
             pass
 
     if not pw_sessions:
@@ -387,7 +468,7 @@ def refresh_token_for_username(username: str) -> Optional[Dict]:
             "username": meta.get("username"),
             "password": password,
             "user_agent": meta.get("user_agent"),
-            "csrf_token": meta.get("csrf_token"),
+            "device_fingerprint": meta.get("device_fingerprint"),
             "cookie_header": meta.get("cookie_header"),
             "time": meta.get("time"),
             "session_key": resp.get("session_key"),
@@ -428,7 +509,7 @@ def _build_url(endpoint: str, params: dict = None) -> str:
             url = url + "?" + qs
     return url
 
-# ================== 7.2 CRM GET (fetch внутри браузера, но вызов через PW-thread) ==================
+# ================== 7.2 CRM GET ==================
 def crm_get(endpoint: str, params: dict = None):
     sess = get_next_session()
     if not sess:
@@ -439,9 +520,8 @@ def crm_get(endpoint: str, params: dict = None):
 
     resp = pw_manager._rpc("fetch_get", {"session_key": key, "url": url}, timeout=60)
     if not resp.get("ok"):
-        # если драйвер/страница умерла, попробуем refresh и повтор 1 раз
         uname = sess.get("username")
-        print(f"[AUTH] {uname} → fetch error → refresh and retry: {resp.get('error')}")
+        print(f"[AUTH] {uname} → fetch error → refresh: {resp.get('error')}")
         new_sess = refresh_token_for_username(uname)
         if not new_sess:
             return f"❌ Ошибка CRM(fetch): {resp.get('error')}"
@@ -455,10 +535,9 @@ def crm_get(endpoint: str, params: dict = None):
     txt = out.get("text", "") or ""
     jsn = out.get("json", None)
 
-    # если 401/403 — пробуем refresh и повтор 1 раз
     if status in (401, 403):
         uname = sess["username"]
-        print(f"[AUTH] {uname} → 401/403 → обновляем сессию")
+        print(f"[AUTH] {uname} → {status} → обновляем сессию")
         new_sess = refresh_token_for_username(uname)
         if new_sess:
             key2 = new_sess.get("session_key")
@@ -471,7 +550,7 @@ def crm_get(endpoint: str, params: dict = None):
 
     return ResponseLike(status_code=status, text=txt, json_data=jsn)
 
-# ================== 8. ОЧЕРЕДЬ CRM (оставляем твою архитектуру) ==================
+# ================== 8. ОЧЕРЕДЬ CRM ==================
 crm_queue = Queue()
 RESULT_TIMEOUT = 45
 
@@ -632,7 +711,7 @@ def search_by_fio(text: str):
     return "📌 Результаты поиска по ФИО:\n\n" + "\n".join(results)
 
 def search_by_address(address: str):
-    return "⚠️ Поиск по адресу на pena.rest (v3) не настроен. Скинь запрос из Network — добавлю."
+    return "⚠️ Поиск по адресу временно недоступен."
 
 # ================== 11. FLASK + СЕССИИ ==================
 app = Flask(__name__)
@@ -654,17 +733,16 @@ def start_session():
     existing = active_sessions.get(user_id)
 
     if existing and (now - existing["created"]) < SESSION_TTL:
-        print(f"[SESSION] ❌ Попытка перезапуска сессии {user_id}, отклонено.")
-        return jsonify({"error": "Сессия уже активна. Повторите позже."}), 403
+        print(f"[SESSION] ❌ Попытка перезапуска сессии {user_id}")
+        return jsonify({"error": "Сессия уже активна."}), 403
 
     if existing and (now - existing["created"]) >= SESSION_TTL:
         del active_sessions[user_id]
-        print(f"[SESSION] ⏰ Истекшая сессия {user_id} удалена")
 
     session_token = f"{user_id}-{int(now)}-{random.randint(1000,9999)}"
     active_sessions[user_id] = {"token": session_token, "created": now}
 
-    print(f"[SESSION] 🔑 Активирована новая сессия для {user_id}")
+    print(f"[SESSION] 🔑 Активирована сессия для {user_id}")
     return jsonify({"session_token": session_token})
 
 @app.before_request
@@ -676,16 +754,14 @@ def validate_session():
 
         session = active_sessions.get(uid)
         if not session:
-            return jsonify({"error": "Сессия не найдена. Авторизуйтесь заново."}), 403
+            return jsonify({"error": "Сессия не найдена."}), 403
 
         if session["token"] != token:
-            print(f"[SESSION] ⚠️ Несовпадение токена: uid={uid}")
-            return jsonify({"error": "Сессия недействительна. Вход возможен только с одного устройства."}), 403
+            return jsonify({"error": "Сессия недействительна."}), 403
 
         if time.time() - session["created"] > SESSION_TTL:
             del active_sessions[uid]
-            print(f"[SESSION] ⏰ Истек срок действия сессии {uid}")
-            return jsonify({"error": "Сессия истекла. Авторизуйтесь заново."}), 403
+            return jsonify({"error": "Сессия истекла."}), 403
 
 @app.route('/api/search', methods=['POST'])
 def api_search():
@@ -724,11 +800,10 @@ def refresh_users():
     return jsonify({"ok": True, "count": len(ALLOWED_USER_IDS)})
 
 # ================== 12. ЗАПУСК ==================
-print("🚀 Запуск API с очередью запросов...")
+print("🚀 Запуск API...")
 fetch_allowed_users()
 Thread(target=periodic_fetch, daemon=True).start()
 
-# Пул поднимаем сразу, но синхронно (чтобы не было гонок/падений)
 init_token_pool_playwright(show_browser=False)
 
 def cleanup_sessions():
@@ -737,7 +812,7 @@ def cleanup_sessions():
         expired = [uid for uid, s in active_sessions.items() if now - s["created"] > SESSION_TTL]
         for uid in expired:
             del active_sessions[uid]
-            print(f"[SESSION] 🧹 Удалена просроченная сессия {uid}")
+            print(f"[SESSION] 🧹 Удалена сессия {uid}")
         time.sleep(300)
 
 Thread(target=cleanup_sessions, daemon=True).start()
