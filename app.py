@@ -5,8 +5,8 @@ import json
 import random
 import itertools
 import traceback
-from threading import Thread, Lock
-from typing import Optional, Dict, List
+from threading import Thread, Lock, Event
+from typing import Optional, Dict, List, Any
 from queue import Queue
 from urllib.parse import urlencode
 
@@ -29,27 +29,26 @@ LOGIN_SELECTOR = 'input[placeholder="Логин"]'
 PASSWORD_SELECTOR = 'input[placeholder="Пароль"]'
 SIGN_IN_BUTTON_SELECTOR = 'button[type="submit"]'
 
-TOKENS_FILE = "tokens.json"   # оставляем, но ниже сохраняем только сериализуемые метаданные
+TOKENS_FILE = "tokens.json"
 TOKENS_LOCK = Lock()
 
 # ================== 2. АККАУНТЫ ==================
 accounts = [
-  {"username": "klon9", "password": "7755SSaa"},
+    {"username": "klon9", "password": "7755SSaa"},
 ]
 
-# ================== 3. ПУЛ PLAYWRIGHT СЕССИЙ ==================
-pw_sessions: List[Dict] = []          # живые браузерные сессии (browser/context/page)
+# ================== 3. ПУЛ (метаданные) ==================
+# Важно: Page/Context/Browser теперь НЕ храним в main thread.
+# Здесь только метаданные + session_key, а реальные объекты живут внутри Playwright-thread.
+pw_sessions: List[Dict[str, Any]] = []
 pw_cycle = None
+PW_SESSIONS_LOCK = Lock()
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
 ]
-
-# Playwright должен жить постоянно (иначе fingerprint/сессия умрут)
-_PW = None
-_PW_LOCK = Lock()
 
 class ResponseLike:
     def __init__(self, status_code: int, text: str, json_data=None):
@@ -62,14 +61,7 @@ class ResponseLike:
             raise ValueError("No JSON")
         return self._json_data
 
-def _ensure_playwright_started():
-    global _PW
-    with _PW_LOCK:
-        if _PW is None:
-            _PW = sync_playwright().start()
-            print("[PW] ✅ Playwright started")
-
-# ================== 3.1 TOKENS FILE (оставляем) ==================
+# ================== 3.1 TOKENS FILE (метаданные) ==================
 def load_tokens_from_file() -> List[Dict]:
     try:
         if os.path.exists(TOKENS_FILE):
@@ -88,14 +80,16 @@ def save_tokens_to_file():
         with TOKENS_LOCK:
             tmp = TOKENS_FILE + ".tmp"
             meta = []
-            for s in pw_sessions:
-                meta.append({
-                    "username": s.get("username"),
-                    "user_agent": s.get("user_agent"),
-                    "csrf_token": s.get("csrf_token"),
-                    "cookie_header": s.get("cookie_header"),
-                    "time": s.get("time"),
-                })
+            with PW_SESSIONS_LOCK:
+                for s in pw_sessions:
+                    meta.append({
+                        "username": s.get("username"),
+                        "user_agent": s.get("user_agent"),
+                        "csrf_token": s.get("csrf_token"),
+                        "cookie_header": s.get("cookie_header"),
+                        "time": s.get("time"),
+                        "session_key": s.get("session_key"),
+                    })
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
             os.replace(tmp, TOKENS_FILE)
@@ -104,157 +98,323 @@ def save_tokens_to_file():
         print(f"[TOKENS ERROR] {e}")
         traceback.print_exc()
 
-# ================== 4. PLAYWRIGHT LOGIN (ЖИВАЯ СЕССИЯ) ==================
-def login_crm_playwright(username: str, password: str, show_browser: bool = False) -> Optional[Dict]:
-    _ensure_playwright_started()
-    browser = None
-    try:
-        print(f"[PLW] 🔵 Вход под {username}...")
-        browser = _PW.chromium.launch(
-            headless=not show_browser,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-            timeout=60000
-        )
-        ua = random.choice(USER_AGENTS)
-        context = browser.new_context(user_agent=ua)
-        page: Page = context.new_page()
+# ================== 4. PLAYWRIGHT В ОДНОМ THREAD ==================
+class PWManager:
+    def __init__(self):
+        self.q: Queue = Queue()
+        self.thread = Thread(target=self._run, daemon=True)
+        self.ready = Event()
+        self.started = False
 
-        page.goto(LOGIN_PAGE, wait_until="load", timeout=30000)
-        page.fill(LOGIN_SELECTOR, username)
-        time.sleep(0.4)
-        page.fill(PASSWORD_SELECTOR, password)
-        time.sleep(0.4)
-        page.click(SIGN_IN_BUTTON_SELECTOR)
-        page.wait_for_timeout(2000)
+        # Живут только в PW-thread:
+        self._pw = None
+        self._browser_by_key: Dict[str, Any] = {}
+        self._context_by_key: Dict[str, Any] = {}
+        self._page_by_key: Dict[str, Page] = {}
+        self._session_meta_by_key: Dict[str, Dict[str, Any]] = {}
 
-        cookies = context.cookies()
-        cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
-        csrf = next((c["value"] for c in cookies if c["name"] == "csrf_token"), "")
-        user_agent = page.evaluate("() => navigator.userAgent")
+    def start(self):
+        if not self.started:
+            self.started = True
+            self.thread.start()
 
-        if cookie_header:
-            sess = {
+    def _rpc(self, cmd: str, payload: dict = None, timeout: int = 90) -> dict:
+        if payload is None:
+            payload = {}
+        box = {"done": Event(), "resp": None}
+        self.q.put((cmd, payload, box))
+        ok = box["done"].wait(timeout)
+        if not ok:
+            return {"ok": False, "error": "timeout"}
+        return box["resp"] or {"ok": False, "error": "no_response"}
+
+    def _run(self):
+        try:
+            self._pw = sync_playwright().start()
+            self.ready.set()
+            print("[PW] ✅ Playwright thread started")
+        except Exception as e:
+            print(f"[PW] ❌ failed to start: {e}")
+            traceback.print_exc()
+            self.ready.set()
+            return
+
+        while True:
+            cmd, payload, box = self.q.get()
+            try:
+                if cmd == "init_pool":
+                    resp = self._cmd_init_pool(payload)
+                elif cmd == "refresh_user":
+                    resp = self._cmd_refresh_user(payload)
+                elif cmd == "fetch_get":
+                    resp = self._cmd_fetch_get(payload)
+                elif cmd == "close_key":
+                    resp = self._cmd_close_key(payload)
+                elif cmd == "ping":
+                    resp = {"ok": True}
+                else:
+                    resp = {"ok": False, "error": f"unknown_cmd:{cmd}"}
+            except Exception as e:
+                resp = {"ok": False, "error": str(e), "trace": traceback.format_exc()}
+            finally:
+                box["resp"] = resp
+                box["done"].set()
+                self.q.task_done()
+
+    def _new_session_key(self, username: str) -> str:
+        return f"{username}-{int(time.time())}-{random.randint(1000,9999)}"
+
+    def _login(self, username: str, password: str, show_browser: bool = False) -> dict:
+        if not self._pw:
+            return {"ok": False, "error": "playwright_not_ready"}
+
+        browser = None
+        try:
+            ua = random.choice(USER_AGENTS)
+            browser = self._pw.chromium.launch(
+                headless=not show_browser,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+                timeout=60000
+            )
+            context = browser.new_context(user_agent=ua)
+            page: Page = context.new_page()
+
+            page.goto(LOGIN_PAGE, wait_until="load", timeout=30000)
+            page.fill(LOGIN_SELECTOR, username)
+            page.wait_for_timeout(400)
+            page.fill(PASSWORD_SELECTOR, password)
+            page.wait_for_timeout(400)
+            page.click(SIGN_IN_BUTTON_SELECTOR)
+            page.wait_for_timeout(2000)
+
+            cookies = context.cookies()
+            cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+            csrf = next((c["value"] for c in cookies if c["name"] == "csrf_token"), "")
+            user_agent = page.evaluate("() => navigator.userAgent") or ua
+
+            if not cookie_header:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+                return {"ok": False, "error": "no_cookie_header"}
+
+            session_key = self._new_session_key(username)
+
+            self._browser_by_key[session_key] = browser
+            self._context_by_key[session_key] = context
+            self._page_by_key[session_key] = page
+            self._session_meta_by_key[session_key] = {
                 "username": username,
-                "password": password,      # чтобы refresh работал без поиска в accounts
-                "browser": browser,
-                "context": context,
-                "page": page,
-                "cookie_header": cookie_header,
+                "user_agent": user_agent,
                 "csrf_token": csrf,
-                "user_agent": user_agent or ua,
-                "time": int(time.time())
+                "cookie_header": cookie_header,
+                "time": int(time.time()),
             }
-            print(f"[PLW] ✅ {username} авторизован.")
-            return sess
 
-        # если куки не получили — закрываем
-        try:
-            browser.close()
-        except Exception:
-            pass
-        return None
+            print(f"[PLW] ✅ {username} авторизован. key={session_key}")
+            return {"ok": True, "session_key": session_key, "meta": self._session_meta_by_key[session_key]}
 
-    except Exception as e:
-        print(f"[PLW ERROR] {username}: {e}")
-        traceback.print_exc()
-        try:
-            if browser:
-                browser.close()
-        except Exception:
-            pass
-        return None
+        except Exception as e:
+            try:
+                if browser:
+                    browser.close()
+            except Exception:
+                pass
+            return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
 
-# ================== 5. ПУЛ СЕССИЙ ИНИЦИАЛИЗАЦИЯ ==================
+    def _cmd_close_key(self, payload: dict) -> dict:
+        key = payload.get("session_key")
+        if not key:
+            return {"ok": False, "error": "no_session_key"}
+
+        b = self._browser_by_key.pop(key, None)
+        self._context_by_key.pop(key, None)
+        self._page_by_key.pop(key, None)
+        self._session_meta_by_key.pop(key, None)
+
+        if b:
+            try:
+                b.close()
+            except Exception:
+                pass
+        return {"ok": True}
+
+    def _cmd_init_pool(self, payload: dict) -> dict:
+        show_browser = bool(payload.get("show_browser", False))
+        created = []
+        for acc in accounts:
+            r = self._login(acc["username"], acc["password"], show_browser=show_browser)
+            if r.get("ok"):
+                created.append(r)
+        return {"ok": True, "created": created}
+
+    def _cmd_refresh_user(self, payload: dict) -> dict:
+        username = payload.get("username")
+        password = payload.get("password")
+        old_key = payload.get("old_session_key")
+        show_browser = bool(payload.get("show_browser", False))
+
+        if not username or not password:
+            return {"ok": False, "error": "username_or_password_missing"}
+
+        r = self._login(username, password, show_browser=show_browser)
+        if r.get("ok") and old_key:
+            self._cmd_close_key({"session_key": old_key})
+        return r
+
+    def _cmd_fetch_get(self, payload: dict) -> dict:
+        key = payload.get("session_key")
+        url = payload.get("url")
+        if not key or not url:
+            return {"ok": False, "error": "missing_key_or_url"}
+
+        page = self._page_by_key.get(key)
+        if not page:
+            return {"ok": False, "error": "page_not_found_for_key"}
+
+        js = """
+        async (url) => {
+          try {
+            const r = await fetch(url, { method: "GET", credentials: "include" });
+            const txt = await r.text();
+            let jsn = null;
+            try { jsn = JSON.parse(txt); } catch (e) {}
+            return { ok: r.ok, status: r.status, text: txt, json: jsn };
+          } catch (e) {
+            return { ok: false, status: 0, text: String(e), json: null, error: String(e) };
+          }
+        }
+        """
+        out = page.evaluate(js, url)
+        return {"ok": True, "out": out}
+
+pw_manager = PWManager()
+pw_manager.start()
+pw_manager.ready.wait(30)
+
+# ================== 5. ПУЛ СЕССИЙ (метаданные) ==================
 def init_token_pool_playwright(show_browser: bool = False):
     global pw_sessions, pw_cycle
-    _ensure_playwright_started()
 
-    # файл читаем, но реальная защита теперь держится на живых pages,
-    # поэтому всегда поднимаем pw_sessions (иначе fingerprint не будет).
     load_tokens_from_file()
 
-    print("[POOL] 🔄 Логин через Playwright (живые сессии)...")
-    pw_sessions = []
-    for acc in accounts:
-        tok = login_crm_playwright(acc["username"], acc["password"], show_browser=show_browser)
-        if tok:
-            pw_sessions.append(tok)
+    print("[POOL] 🔄 Логин через Playwright (живые сессии, строго один thread)...")
+    resp = pw_manager._rpc("init_pool", {"show_browser": show_browser}, timeout=120)
+
+    if not resp.get("ok"):
+        print(f"[POOL] ❌ init_pool failed: {resp.get('error')}")
+        pw_sessions = []
+        pw_cycle = None
+        return
+
+    created = resp.get("created", [])
+    new_sessions = []
+    for item in created:
+        meta = item.get("meta", {})
+        new_sessions.append({
+            "username": meta.get("username"),
+            "password": next((a["password"] for a in accounts if a["username"] == meta.get("username")), None),
+            "user_agent": meta.get("user_agent"),
+            "csrf_token": meta.get("csrf_token"),
+            "cookie_header": meta.get("cookie_header"),
+            "time": meta.get("time"),
+            "session_key": item.get("session_key"),
+        })
+
+    with PW_SESSIONS_LOCK:
+        pw_sessions = new_sessions
+        pw_cycle = itertools.cycle(pw_sessions) if pw_sessions else None
 
     if pw_sessions:
-        pw_cycle = itertools.cycle(pw_sessions)
         save_tokens_to_file()
-        print(f"[POOL] ✅ Загружено {len(pw_sessions)} сессий.")
-        print(f"[PW] sessions ready: {len(pw_sessions)}")
+        print(f"[POOL] ✅ init ok, sessions={len(pw_sessions)}")
     else:
-        pw_cycle = None
         print("[POOL] ❌ Пустой пул сессий.")
 
-# ================== 6. SESSION GETTER ==================
 def get_next_session() -> Optional[Dict]:
     global pw_sessions, pw_cycle
+    with PW_SESSIONS_LOCK:
+        if not pw_sessions:
+            # Поднимем пул синхронно (важно для первых запросов)
+            pass
+
     if not pw_sessions:
         init_token_pool_playwright()
-        if not pw_sessions:
-            return None
-    if pw_cycle is None:
-        pw_cycle = itertools.cycle(pw_sessions)
-    try:
-        s = next(pw_cycle)
-        print(f"[POOL] 🔁 Используется сессия {s['username']}")
-        return s
-    except StopIteration:
-        pw_cycle = itertools.cycle(pw_sessions)
-        s = next(pw_cycle)
-        print(f"[POOL] ♻️ Перезапуск цикла, выбран {s['username']}")
-        return s
+        with PW_SESSIONS_LOCK:
+            if not pw_sessions:
+                return None
 
-# ================== 7. REFRESH СЕССИИ ==================
+    with PW_SESSIONS_LOCK:
+        if pw_cycle is None:
+            pw_cycle = itertools.cycle(pw_sessions)
+        try:
+            s = next(pw_cycle)
+            print(f"[POOL] 🔁 Используется сессия {s['username']}")
+            return s
+        except StopIteration:
+            pw_cycle = itertools.cycle(pw_sessions)
+            s = next(pw_cycle)
+            print(f"[POOL] ♻️ Перезапуск цикла, выбран {s['username']}")
+            return s
+
 def refresh_token_for_username(username: str) -> Optional[Dict]:
     global pw_sessions, pw_cycle
     try:
-        # находим старую сессию
-        old = None
-        for s in pw_sessions:
-            if s.get("username") == username:
-                old = s
-                break
+        with PW_SESSIONS_LOCK:
+            old = next((s for s in pw_sessions if s.get("username") == username), None)
 
-        if not old:
-            # если не нашли — ищем в accounts
-            acc = next(a for a in accounts if a["username"] == username)
-            new_sess = login_crm_playwright(acc["username"], acc["password"])
+        if old:
+            password = old.get("password")
+            old_key = old.get("session_key")
         else:
-            new_sess = login_crm_playwright(old["username"], old["password"])
+            acc = next(a for a in accounts if a["username"] == username)
+            password = acc["password"]
+            old_key = None
 
-        if new_sess:
-            # закрываем старую
-            if old:
-                try:
-                    old["browser"].close()
-                except Exception:
-                    pass
+        resp = pw_manager._rpc(
+            "refresh_user",
+            {"username": username, "password": password, "old_session_key": old_key, "show_browser": False},
+            timeout=120
+        )
 
-            # заменяем/добавляем
+        if not resp.get("ok"):
+            print(f"[AUTH] ❌ refresh failed: {resp.get('error')}")
+            return None
+
+        meta = resp.get("meta", {})
+        new_sess = {
+            "username": meta.get("username"),
+            "password": password,
+            "user_agent": meta.get("user_agent"),
+            "csrf_token": meta.get("csrf_token"),
+            "cookie_header": meta.get("cookie_header"),
+            "time": meta.get("time"),
+            "session_key": resp.get("session_key"),
+        }
+
+        with PW_SESSIONS_LOCK:
+            replaced = False
             for i, s in enumerate(pw_sessions):
                 if s.get("username") == username:
                     pw_sessions[i] = new_sess
+                    replaced = True
                     break
-            else:
+            if not replaced:
                 pw_sessions.append(new_sess)
-
             pw_cycle = itertools.cycle(pw_sessions)
-            save_tokens_to_file()
-            print(f"[AUTH] 🔁 {username} session refreshed.")
-            return new_sess
+
+        save_tokens_to_file()
+        print(f"[AUTH] 🔁 {username} session refreshed.")
+        return new_sess
 
     except Exception as e:
         print(f"[AUTH ERROR] {e}")
         traceback.print_exc()
     return None
 
-# ================== 7.1 FETCH ВНУТРИ PLAYWRIGHT PAGE ==================
+# ================== 7.1 BUILD URL ==================
 def _build_url(endpoint: str, params: dict = None) -> str:
-    # endpoint может быть "/api/..." или "https://..."
     if endpoint.startswith("http"):
         url = endpoint
     else:
@@ -268,54 +428,50 @@ def _build_url(endpoint: str, params: dict = None) -> str:
             url = url + "?" + qs
     return url
 
+# ================== 7.2 CRM GET (fetch внутри браузера, но вызов через PW-thread) ==================
 def crm_get(endpoint: str, params: dict = None):
     sess = get_next_session()
     if not sess:
         return "❌ Нет сессий Playwright."
 
-    page: Page = sess["page"]
     url = _build_url(endpoint, params=params)
+    key = sess.get("session_key")
 
-    # fetch делаем внутри браузера, чтобы прошёл device fingerprint
-    js = """
-    async (url) => {
-      try {
-        const r = await fetch(url, { method: "GET", credentials: "include" });
-        const txt = await r.text();
-        let jsn = null;
-        try { jsn = JSON.parse(txt); } catch (e) {}
-        return { ok: r.ok, status: r.status, text: txt, json: jsn };
-      } catch (e) {
-        return { ok: false, status: 0, text: String(e), json: null, error: String(e) };
-      }
-    }
-    """
+    resp = pw_manager._rpc("fetch_get", {"session_key": key, "url": url}, timeout=60)
+    if not resp.get("ok"):
+        # если драйвер/страница умерла, попробуем refresh и повтор 1 раз
+        uname = sess.get("username")
+        print(f"[AUTH] {uname} → fetch error → refresh and retry: {resp.get('error')}")
+        new_sess = refresh_token_for_username(uname)
+        if not new_sess:
+            return f"❌ Ошибка CRM(fetch): {resp.get('error')}"
+        key2 = new_sess.get("session_key")
+        resp = pw_manager._rpc("fetch_get", {"session_key": key2, "url": url}, timeout=60)
+        if not resp.get("ok"):
+            return f"❌ Ошибка CRM(fetch): {resp.get('error')}"
 
-    try:
-        out = page.evaluate(js, url)
+    out = (resp.get("out") or {})
+    status = int(out.get("status", 0) or 0)
+    txt = out.get("text", "") or ""
+    jsn = out.get("json", None)
 
-        status = int(out.get("status", 0) or 0)
-        txt = out.get("text", "") or ""
-        jsn = out.get("json", None)
+    # если 401/403 — пробуем refresh и повтор 1 раз
+    if status in (401, 403):
+        uname = sess["username"]
+        print(f"[AUTH] {uname} → 401/403 → обновляем сессию")
+        new_sess = refresh_token_for_username(uname)
+        if new_sess:
+            key2 = new_sess.get("session_key")
+            resp2 = pw_manager._rpc("fetch_get", {"session_key": key2, "url": url}, timeout=60)
+            if resp2.get("ok"):
+                out2 = (resp2.get("out") or {})
+                status = int(out2.get("status", 0) or 0)
+                txt = out2.get("text", "") or ""
+                jsn = out2.get("json", None)
 
-        # если 401/403 — пробуем refresh и повтор 1 раз
-        if status in (401, 403):
-            uname = sess["username"]
-            print(f"[AUTH] {uname} → 401/403 → обновляем сессию")
-            new_sess = refresh_token_for_username(uname)
-            if new_sess:
-                page2: Page = new_sess["page"]
-                out = page2.evaluate(js, url)
-                status = int(out.get("status", 0) or 0)
-                txt = out.get("text", "") or ""
-                jsn = out.get("json", None)
+    return ResponseLike(status_code=status, text=txt, json_data=jsn)
 
-        return ResponseLike(status_code=status, text=txt, json_data=jsn)
-
-    except Exception as e:
-        return f"❌ Ошибка CRM(fetch): {e}"
-
-# ================== 8. ОЧЕРЕДЬ CRM ==================
+# ================== 8. ОЧЕРЕДЬ CRM (оставляем твою архитектуру) ==================
 crm_queue = Queue()
 RESULT_TIMEOUT = 45
 
@@ -373,8 +529,7 @@ def periodic_fetch():
 def search_by_iin(iin: str):
     r = enqueue_crm_get("/api/v3/search/iin", params={"iin": iin})
     if r["status"] != "ok":
-        pos = r.get("queue_position", "?")
-        return f"⌛ Ваш запрос в очереди (позиция {pos})."
+        return "⌛ Ваш запрос в очереди."
 
     resp = r["result"]
     if isinstance(resp, str):
@@ -406,8 +561,7 @@ def search_by_phone(phone: str):
 
     r = enqueue_crm_get("/api/v3/search/phone", params={"phone": clean, "limit": 100})
     if r["status"] != "ok":
-        pos = r.get("queue_position", "?")
-        return f"⌛ Ваш запрос в очереди (позиция {pos})."
+        return "⌛ Ваш запрос в очереди."
 
     resp = r["result"]
     if isinstance(resp, str):
@@ -438,7 +592,6 @@ def search_by_fio(text: str):
         if len(parts) < 2:
             return "⚠️ Укажите имя и отчество после ',,'"
         q = {"name": parts[0], "father_name": " ".join(parts[1:]), "smart_mode": "true", "limit": 100}
-        # в таком режиме фамилия не используется (как у тебя было в v2 логике)
     else:
         parts = text.split(" ")
         params = {}
@@ -452,8 +605,7 @@ def search_by_fio(text: str):
 
     r = enqueue_crm_get("/api/v3/search/fio", params=q)
     if r["status"] != "ok":
-        pos = r.get("queue_position", "?")
-        return f"⌛ Ваш запрос в очереди (позиция {pos})."
+        return "⌛ Ваш запрос в очереди."
 
     resp = r["result"]
     if isinstance(resp, str):
@@ -487,7 +639,7 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 active_sessions: Dict[int, Dict[str, float]] = {}
-SESSION_TTL = 3600  # 1 час
+SESSION_TTL = 3600
 
 @app.route('/api/session/start', methods=['POST'])
 def start_session():
@@ -510,10 +662,7 @@ def start_session():
         print(f"[SESSION] ⏰ Истекшая сессия {user_id} удалена")
 
     session_token = f"{user_id}-{int(now)}-{random.randint(1000,9999)}"
-    active_sessions[user_id] = {
-        "token": session_token,
-        "created": now
-    }
+    active_sessions[user_id] = {"token": session_token, "created": now}
 
     print(f"[SESSION] 🔑 Активирована новая сессия для {user_id}")
     return jsonify({"session_token": session_token})
@@ -578,7 +727,9 @@ def refresh_users():
 print("🚀 Запуск API с очередью запросов...")
 fetch_allowed_users()
 Thread(target=periodic_fetch, daemon=True).start()
-Thread(target=init_token_pool_playwright, daemon=True).start()
+
+# Пул поднимаем сразу, но синхронно (чтобы не было гонок/падений)
+init_token_pool_playwright(show_browser=False)
 
 def cleanup_sessions():
     while True:
