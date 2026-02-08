@@ -266,10 +266,15 @@ class PWManager:
                 "time": int(time.time()),
             }
             
-            # Тестируем запрос с полученным fingerprint
+            # Тестируем запрос с полученным fingerprint - ИСПРАВЛЕНО
+            test_args = {
+                "fp": fingerprint,
+                "cookies": cookie_header
+            }
             test_api = page.evaluate("""
-                async (fp, cookies) => {
+                async (args) => {
                     try {
+                        const { fp, cookies } = args;
                         const headers = {
                             'accept': 'application/json',
                             'content-type': 'application/json',
@@ -292,7 +297,7 @@ class PWManager:
                         return {status: 0, text: e.message};
                     }
                 }
-            """, fingerprint, cookie_header)
+            """, test_args)
             
             print(f"[PLW-FP] Тест API: статус {test_api.get('status')}")
             
@@ -589,7 +594,7 @@ def crm_get(endpoint: str, params: dict = None):
         }, timeout=60)
         
         if not resp.get("ok"):
-            return f"❌ Ошибка CRM после обновления: {resp.get('error')}"
+            return f"❌ Ошибка CRM после обновления: {resp.get('error')}")
     
     result = resp.get("result", {})
     status = int(result.get("status", 0) or 0)
