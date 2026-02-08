@@ -6,16 +6,17 @@ import random
 import itertools
 import traceback
 import hashlib
-import threading
-from threading import Thread, Lock, Event, local
+import re
+from threading import Thread, Lock, Event
 from typing import Optional, Dict, List, Any
+from queue import Queue
 from urllib.parse import urlencode, urljoin
 from datetime import datetime
 
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, Page
 
 # ================== 1. НАСТРОЙКИ ==================
 BOT_TOKEN = "8545598161:AAGM6HtppAjUOuSAYH0mX5oNcPU0SuO59N4"
@@ -36,11 +37,10 @@ accounts = [
     {"username": "klon9", "password": "7755SSaa"},
 ]
 
-# ================== 3. ПУЛ И ТРЕД-ЛОКАЛЬНОЕ ХРАНИЛИЩЕ ==================
+# ================== 3. ПУЛ СЕССИЙ ==================
 pw_sessions: List[Dict[str, Any]] = []
 pw_cycle = None
 PW_SESSIONS_LOCK = Lock()
-thread_local = local()  # Тред-локальное хранилище для сессий
 
 class ResponseLike:
     def __init__(self, status_code: int, text: str, json_data=None):
@@ -53,7 +53,7 @@ class ResponseLike:
             raise ValueError("No JSON")
         return self._json_data
 
-# ================== 4. PLAYWRIGHT MANAGER ==================
+# ================== 4. PLAYWRIGHT MANAGER (УЛУЧШЕННЫЙ) ==================
 class PWManager:
     def __init__(self):
         self._pw = None
@@ -74,12 +74,14 @@ class PWManager:
                 self.ready.set()
     
     def extract_fingerprint_from_network(self, request):
-        """Извлекаем fingerprint из сетевых запросов"""
+        """Извлекаем fingerprint из сетевых запросов (как в локальном тесте)"""
+        # Ищем в заголовках
         if 'x-device-fingerprint' in request.headers:
             fp = request.headers['x-device-fingerprint']
-            if fp and len(fp) == 64:
+            if fp and len(fp) == 64:  # SHA256
                 return fp
         
+        # Ищем в теле запроса при логине
         if request.post_data:
             try:
                 data = json.loads(request.post_data)
@@ -87,6 +89,8 @@ class PWManager:
                     fp = data['device_fingerprint']
                     if len(fp) == 64:
                         return fp
+                
+                # Также ищем device_fp_hash
                 if 'device_fp_hash' in data and data['device_fp_hash']:
                     return data['device_fp_hash']
             except:
@@ -98,12 +102,14 @@ class PWManager:
         try:
             viewport = page.viewport_size
             if viewport:
+                # Случайные движения мыши
                 for _ in range(random.randint(2, 5)):
                     x = random.randint(0, viewport['width'])
                     y = random.randint(0, viewport['height'])
                     page.mouse.move(x, y)
                     time.sleep(random.uniform(0.1, 0.5))
                 
+                # Случайные клики
                 if random.random() < 0.3:
                     page.mouse.click(
                         random.randint(100, viewport['width'] - 100),
@@ -112,6 +118,7 @@ class PWManager:
                     )
                     time.sleep(random.uniform(0.2, 1.0))
                 
+                # Случайный скролл
                 if random.random() < 0.4:
                     scroll_amount = random.randint(100, 500)
                     page.evaluate(f"window.scrollBy(0, {scroll_amount})")
@@ -120,14 +127,28 @@ class PWManager:
             pass
     
     def extract_fingerprint_from_js(self, page):
-        """Извлекаем fingerprint из JavaScript"""
+        """Извлекаем fingerprint из JavaScript (как в локальном тесте)"""
         print("[SESSION] 🔧 Извлекаем fingerprint из JavaScript...")
         
         js_methods = [
+            # Метод 1: Ищем в localStorage
+            """
+            () => {
+                const keys = [];
+                for (let i = 0; i < localStorage.length; i++) {
+                    keys.push(localStorage.key(i));
+                }
+                return {type: 'localStorage', keys: keys};
+            }
+            """,
+            
+            # Метод 2: Ищем fingerprint в window объекте
             """
             () => {
                 const fingerprints = {};
                 const windowKeys = Object.keys(window);
+                
+                // Ищем строки длиной 64 символа (SHA256)
                 for (const key of windowKeys) {
                     try {
                         const value = window[key];
@@ -136,10 +157,12 @@ class PWManager:
                         }
                     } catch(e) {}
                 }
+                
                 return {type: 'window', fingerprints: fingerprints};
             }
             """,
             
+            # Метод 3: Ищем в APP_CONFIG
             """
             () => {
                 const results = {};
@@ -172,9 +195,10 @@ class PWManager:
                             print(f"[SESSION] ✅ Найден fingerprint в {key}: {value[:30]}...")
                             return value
                 
-            except:
+            except Exception as e:
                 pass
         
+        # Если fingerprint не найден, генерируем его
         print("[SESSION] ⚠️ Fingerprint не найден в JavaScript, генерируем...")
         return self._generate_fingerprint(page)
     
@@ -200,6 +224,7 @@ class PWManager:
                 }
             """)
             
+            # Используем тот же username, что и в локальном тесте
             username = "klon9"
             data_str = json.dumps(browser_data, sort_keys=True) + username
             fingerprint = hashlib.sha256(data_str.encode()).hexdigest()
@@ -207,12 +232,13 @@ class PWManager:
             print(f"[SESSION] 📝 Сгенерирован fingerprint: {fingerprint[:30]}...")
             return fingerprint
         except:
+            # Фоллбэк: просто хэш от времени и случайного числа
             fingerprint = hashlib.sha256(f"{int(time.time())}{random.randint(1000, 9999)}".encode()).hexdigest()
             print(f"[SESSION] 📝 Фоллбэк fingerprint: {fingerprint[:30]}...")
             return fingerprint
     
     def create_session(self, username: str, password: str) -> Optional[Dict]:
-        """Создаем новую сессию"""
+        """Создаем новую сессию с улучшениями из локального теста"""
         if not self._pw:
             print("[SESSION] ❌ Playwright не инициализирован")
             return None
@@ -222,6 +248,7 @@ class PWManager:
         browser = None
         context = None
         try:
+            # УЛУЧШЕННЫЕ НАСТРОЙКИ КАК В ЛОКАЛЬНОМ ТЕСТЕ
             browser = self._pw.chromium.launch(
                 headless=True,
                 args=[
@@ -230,6 +257,7 @@ class PWManager:
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
                     "--disable-blink-features=AutomationControlled",
+                    # ВАЖНЫЕ ДОПОЛНЕНИЯ ИЗ ЛОКАЛЬНОГО ТЕСТА:
                     "--use-gl=egl",
                     "--disable-web-security",
                     "--disable-features=IsolateOrigins,site-per-process",
@@ -269,8 +297,9 @@ class PWManager:
                 timeout=60000
             )
             
+            # УЛУЧШЕННЫЙ КОНТЕКСТ КАК В ЛОКАЛЬНОМ ТЕСТЕ
             context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",  # АКУАЛЬНЫЙ UA
                 viewport={"width": 1920, "height": 1080},
                 locale="ru-RU",
                 timezone_id="Europe/Moscow",
@@ -279,19 +308,27 @@ class PWManager:
             
             page = context.new_page()
             
+            # УЛУЧШЕННАЯ МАСКИРОВКА КАК В ЛОКАЛЬНОМ ТЕСТЕ
             page.add_init_script("""
+                // Базовые переопределения
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                 Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
                 Object.defineProperty(navigator, 'languages', {get: () => ['ru-RU', 'ru', 'en-US', 'en']});
+                
+                // Chrome detection
                 window.chrome = {runtime: {}};
                 
+                // WebGL переопределение
                 const getParameter = WebGLRenderingContext.prototype.getParameter;
                 WebGLRenderingContext.prototype.getParameter = function(parameter) {
                     if (parameter === 37445) return 'Intel Inc.';
                     if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+                    if (parameter === 37440) return 'WebKit WebGL';
+                    if (parameter === 37441) return 'WebKit WebGL';
                     return getParameter(parameter);
                 };
                 
+                // Canvas fingerprinting
                 const toDataURL = HTMLCanvasElement.prototype.toDataURL;
                 HTMLCanvasElement.prototype.toDataURL = function(type, ...args) {
                     if (type && type.toLowerCase() === 'image/webp') {
@@ -299,8 +336,46 @@ class PWManager:
                     }
                     return toDataURL.call(this, type, ...args);
                 };
+                
+                // Permissions API
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                        Promise.resolve({ state: Notification.permission }) :
+                        originalQuery(parameters)
+                );
+                
+                // Notification permission
+                Object.defineProperty(Notification, 'permission', {get: () => 'denied'});
+                
+                // Webdriver
+                Object.defineProperty(window, 'navigator', {
+                    value: new Proxy(navigator, {
+                        has: (target, key) => (key === 'webdriver' ? false : key in target),
+                        get: (target, key) => 
+                            key === 'webdriver' ?
+                                undefined :
+                                typeof target[key] === 'function' ?
+                                    target[key].bind(target) :
+                                    target[key]
+                    })
+                });
+                
+                // Добавляем случайные задержки для имитации человека
+                Math.random = (function() {
+                    const original = Math.random;
+                    return function() {
+                        const result = original();
+                        if (Math.random() < 0.1) {
+                            const start = Date.now();
+                            while (Date.now() - start < Math.random() * 10) {}
+                        }
+                        return result;
+                    };
+                })();
             """)
             
+            # Переменная для хранения fingerprint из сетевых запросов
             extracted_fingerprints = []
             
             def network_interceptor(request):
@@ -310,24 +385,30 @@ class PWManager:
             
             page.on("request", network_interceptor)
             
+            # Логинимся с улучшениями
             print(f"[SESSION] Логин {username}...")
             page.goto(LOGIN_PAGE, wait_until="networkidle", timeout=60000)
             time.sleep(2)
             
+            # Имитация человеческого взаимодействия
             self.human_like_interaction(page)
+            
             page.fill(LOGIN_SELECTOR, username)
-            time.sleep(0.5 + random.random() * 0.5)
+            time.sleep(0.5 + random.random() * 0.5)  # Случайная задержка
             
             self.human_like_interaction(page)
+            
             page.fill(PASSWORD_SELECTOR, password)
-            time.sleep(0.5 + random.random() * 0.5)
+            time.sleep(0.5 + random.random() * 0.5)  # Случайная задержка
             
             self.human_like_interaction(page)
+            
             page.click(SIGN_IN_BUTTON_SELECTOR)
-            self.human_like_interaction(page)
+            self.human_like_interaction(page)  # После клика тоже
             
             time.sleep(3)
             
+            # Проверяем успешность
             current_url = page.url
             print(f"[SESSION] Текущий URL: {current_url}")
             
@@ -337,26 +418,42 @@ class PWManager:
                 time.sleep(2)
                 current_url = page.url
             
+            # Переходим на страницу поиска КАК В ЛОКАЛЬНОМ ТЕСТЕ
             search_url = urljoin(BASE_URL, "/dashboard/search")
             print(f"[SESSION] Переходим на страницу поиска: {search_url}")
             page.goto(search_url, wait_until="networkidle", timeout=30000)
+            
+            # Даем время для загрузки всех скриптов
             time.sleep(3)
             
+            # Ищем fingerprint в JavaScript КАК В ЛОКАЛЬНОМ ТЕСТЕ
             fingerprint = None
             
+            # Проверяем fingerprint из сетевых запросов
             if extracted_fingerprints:
-                fingerprint = extracted_fingerprints[-1]
+                fingerprint = extracted_fingerprints[-1]  # Берем последний
                 print(f"[SESSION] 📡 Fingerprint из сетевого запроса: {fingerprint[:30]}...")
             
+            # Если не нашли в сети, ищем в JS
             if not fingerprint:
                 fingerprint = self.extract_fingerprint_from_js(page)
             
+            # Получаем куки
             cookies = context.cookies()
             cookies_dict = {c['name']: c['value'] for c in cookies}
             cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
             
             print(f"[SESSION] Получено {len(cookies)} кук")
             
+            # Проверяем важные куки
+            important_cookies = ['cf_clearance', 'aegis_session', 'access_token', 'csrf_token', 'access_token_ws']
+            for cookie_name in important_cookies:
+                if cookie_name in cookies_dict:
+                    print(f"[SESSION] ✅ {cookie_name}: {cookies_dict[cookie_name][:30]}...")
+                else:
+                    print(f"[SESSION] ⚠️ {cookie_name}: НЕТ")
+            
+            # УЛУЧШЕННЫЕ ЗАГОЛОВКИ КАК В ЛОКАЛЬНОМ ТЕСТЕ
             headers = {
                 "accept": "application/json",
                 "accept-encoding": "gzip, deflate, br, zstd",
@@ -376,6 +473,7 @@ class PWManager:
                 "x-requested-with": "XMLHttpRequest"
             }
             
+            # Создаем объект сессии
             session_data = {
                 "username": username,
                 "fingerprint": fingerprint,
@@ -390,6 +488,7 @@ class PWManager:
                 "search_url": search_url
             }
             
+            # Тестовый запрос для проверки сессии
             print("[SESSION] 🔍 Тестируем сессию запросом...")
             test_result = self._test_session_health(session_data)
             
@@ -427,13 +526,13 @@ class PWManager:
                     return True
                 else:
                     print(f"[TEST] ⚠️ Ответ не список: {type(data)}")
-                    return True
+                    return True  # Все равно считаем успешным
             elif response.status == 403 or response.status == 401:
                 print(f"[TEST] ❌ Ошибка авторизации: {response.status}")
                 return False
             else:
                 print(f"[TEST] ⚠️ Неожиданный статус: {response.status}")
-                return True
+                return True  # Возможно временная ошибка
                 
         except Exception as e:
             print(f"[TEST] ❌ Исключение при тестовом запросе: {e}")
@@ -453,11 +552,18 @@ class PWManager:
             print(f"[REQUEST] 📡 Запрос к: {url}")
             print(f"[REQUEST] 📋 Используем fingerprint: {session_data.get('fingerprint', '')[:30]}...")
             
+            # Логируем важные куки
+            if 'cf_clearance' in session_data.get('cookies', {}):
+                print(f"[REQUEST] ✅ CF Clearance cookie присутствует")
+            else:
+                print(f"[REQUEST] ⚠️ CF Clearance cookie отсутствует")
+            
             response = session_data["context"].request.get(url, headers=headers, timeout=30000)
             
             session_data["last_used"] = int(time.time())
             
             print(f"[REQUEST] 📊 Статус ответа: {response.status}")
+            print(f"[REQUEST] 📄 Длина ответа: {len(response.text())} символов")
             
             result = {
                 "status": response.status,
@@ -479,6 +585,7 @@ class PWManager:
             
         except Exception as e:
             print(f"[REQUEST] ❌ Ошибка запроса: {e}")
+            traceback.print_exc()
             return {"error": str(e), "success": False}
 
 pw_manager = PWManager()
@@ -490,18 +597,35 @@ def init_token_pool():
     global pw_sessions, pw_cycle
 
     print("\n" + "=" * 60)
-    print("🔄 ИНИЦИАЛИЗАЦИЯ ПУЛА СЕССИЙ")
+    print("🔄 ИНИЦИАЛИЗАЦИЯ ПУЛА СЕССИЙ С УЛУЧШЕНИЯМИ")
     print("=" * 60)
     
     new_sessions = []
     for acc in accounts:
         print(f"[POOL] Создаем сессию для {acc['username']}...")
         
+        # Даем больше времени на создание сессии
         session_data = pw_manager.create_session(acc["username"], acc["password"])
         
         if session_data:
             new_sessions.append(session_data)
             print(f"[POOL] ✅ Сессия создана")
+            
+            # Сохраняем информацию о сессии для отладки
+            with open(f"session_debug_{acc['username']}.json", "w", encoding="utf-8") as f:
+                safe_session_data = {
+                    "username": session_data.get("username"),
+                    "fingerprint": session_data.get("fingerprint", "")[:50] + "...",
+                    "cookies_count": len(session_data.get("cookies", {})),
+                    "important_cookies": {
+                        name: (session_data.get("cookies", {}).get(name, "")[:30] + "..." if name in session_data.get("cookies", {}) else "НЕТ")
+                        for name in ['cf_clearance', 'aegis_session', 'access_token']
+                    },
+                    "created_at": session_data.get("created_at"),
+                    "timestamp": datetime.now().isoformat()
+                }
+                json.dump(safe_session_data, f, ensure_ascii=False, indent=2)
+                print(f"[POOL] 💾 Отладочная информация сохранена в session_debug_{acc['username']}.json")
         else:
             print(f"[POOL] ❌ Не удалось создать сессию")
 
@@ -513,6 +637,7 @@ def init_token_pool():
         print(f"\n[POOL] ✅ Пул инициализирован!")
         print(f"[POOL] Активных сессий: {len(pw_sessions)}")
         
+        # Выводим информацию о важных куках
         for session in pw_sessions:
             print(f"[POOL] Сессия {session.get('username')}:")
             for cookie_name in ['cf_clearance', 'aegis_session']:
@@ -526,33 +651,72 @@ def init_token_pool():
     print("=" * 60)
     return len(pw_sessions) > 0
 
-def get_thread_session() -> Optional[Dict]:
-    """Получаем сессию для текущего потока из thread-local хранилища"""
-    global pw_cycle  # ВАЖНО: объявляем как глобальную переменную
+def get_next_session() -> Optional[Dict]:
+    global pw_sessions, pw_cycle
+
+    if not pw_sessions:
+        if not init_token_pool():
+            return None
+
+    with PW_SESSIONS_LOCK:
+        if pw_cycle is None:
+            pw_cycle = itertools.cycle(pw_sessions)
+        try:
+            s = next(pw_cycle)
+            print(f"[POOL] Используем сессию: {s.get('username', 'unknown')}")
+            return s
+        except StopIteration:
+            pw_cycle = itertools.cycle(pw_sessions)
+            s = next(pw_cycle)
+            return s
+
+def refresh_session(username: str) -> Optional[Dict]:
+    """Обновляем сессию"""
+    global pw_sessions, pw_cycle
     
-    if not hasattr(thread_local, 'session'):
-        print(f"[THREAD] Создаем новую сессию для потока {threading.current_thread().name}")
+    try:
+        print(f"[REFRESH] 🔄 Обновление сессии для {username}...")
         
-        # Инициализируем пул если нужно
+        acc = next((a for a in accounts if a["username"] == username), None)
+        if not acc:
+            return None
+        
         with PW_SESSIONS_LOCK:
-            if not pw_sessions:
-                init_token_pool()
-            if pw_sessions:
-                # Берем первую сессию из пула для этого потока
-                thread_local.session = pw_sessions[0]
-                print(f"[THREAD] ✅ Сессия назначена для потока")
-    
-    return getattr(thread_local, 'session', None)
+            old_session = next((s for s in pw_sessions if s.get("username") == username), None)
+            if old_session and old_session.get("browser"):
+                try:
+                    old_session["browser"].close()
+                except:
+                    pass
+        
+        new_session = pw_manager.create_session(acc["username"], acc["password"])
+        
+        if new_session:
+            with PW_SESSIONS_LOCK:
+                pw_sessions = [s for s in pw_sessions if s.get("username") != username]
+                pw_sessions.append(new_session)
+                pw_cycle = itertools.cycle(pw_sessions)
+            
+            print(f"[REFRESH] ✅ Сессия обновлена")
+            return new_session
+        else:
+            print(f"[REFRESH] ❌ Не удалось обновить сессию")
+            return None
+            
+    except Exception as e:
+        print(f"[REFRESH ERROR] {e}")
+        traceback.print_exc()
+        return None
 
 # ================== 6. CRM GET ==================
 def crm_get(endpoint: str, params: dict = None):
-    """Основная функция для API запросов - синхронная"""
-    session = get_thread_session()
+    """Основная функция для API запросов"""
+    session = get_next_session()
     if not session:
         return ResponseLike(500, "❌ Нет доступных сессий")
     
     username = session.get("username", "unknown")
-    print(f"[CRM] Используем сессию {username} в потоке {threading.current_thread().name}")
+    print(f"[CRM] Используем сессию {username}")
     
     # Делаем запрос
     result = pw_manager.make_request(session, endpoint, params)
@@ -564,20 +728,68 @@ def crm_get(endpoint: str, params: dict = None):
             json_data=result.get("json")
         )
     else:
-        print(f"[CRM] ❌ Ошибка запроса: {result.get('error')}")
+        # Если ошибка аутентификации, пробуем обновить сессию
+        if result.get("status") in [401, 403]:
+            print(f"[CRM] ❌ Ошибка аутентификации, обновляем сессию...")
+            new_session = refresh_session(username)
+            
+            if new_session:
+                print(f"[CRM] 🔄 Делаем запрос с обновленной сессией...")
+                result = pw_manager.make_request(new_session, endpoint, params)
+                if result.get("success"):
+                    return ResponseLike(
+                        status_code=result["status"],
+                        text=result["text"],
+                        json_data=result.get("json")
+                    )
+                else:
+                    print(f"[CRM] ❌ Запрос с обновленной сессией тоже не удался")
+        
         return ResponseLike(
             status_code=result.get("status", 500),
             text=result.get("error", result.get("text", "Unknown error")),
             json_data=None
         )
 
-# ================== 7. ПОИСКОВЫЕ ФУНКЦИИ ==================
+# ================== 7. ОЧЕРЕДЬ ==================
+crm_queue = Queue()
+RESULT_TIMEOUT = 60
+
+def crm_worker():
+    while True:
+        try:
+            func, args, kwargs, result_box = crm_queue.get()
+            res = func(*args, **kwargs)
+            result_box["result"] = res
+            time.sleep(random.uniform(2.0, 3.0))
+        except Exception as e:
+            print(f"[WORKER ERROR] {e}")
+            traceback.print_exc()
+            result_box["error"] = str(e)
+        finally:
+            crm_queue.task_done()
+
+Thread(target=crm_worker, daemon=True).start()
+
+def enqueue_crm_get(endpoint, params=None):
+    result_box = {}
+    crm_queue.put((crm_get, (endpoint,), {"params": params}, result_box))
+    t0 = time.time()
+    while "result" not in result_box and "error" not in result_box:
+        if time.time() - t0 > RESULT_TIMEOUT:
+            return {"status": "timeout"}
+        time.sleep(0.1)
+    if "error" in result_box:
+        return {"status": "error", "error": result_box["error"]}
+    return {"status": "ok", "result": result_box["result"]}
+
+# ================== 8. ПОИСКОВЫЕ ФУНКЦИИ ==================
 def search_by_iin(iin: str):
     print(f"[SEARCH IIN] 🔍 Поиск по ИИН: {iin}")
-    
-    # СИНХРОННЫЙ ВЫЗОВ
-    resp = crm_get("/api/v3/search/iin", params={"iin": iin})
-    
+    r = enqueue_crm_get("/api/v3/search/iin", params={"iin": iin})
+    if r["status"] != "ok":
+        return "⌛ Ваш запрос в очереди."
+    resp = r["result"]
     if isinstance(resp, str):
         return resp
     if resp.status_code == 404:
@@ -608,9 +820,10 @@ def search_by_phone(phone: str):
         clean = "7" + clean[1:]
     
     print(f"[SEARCH PHONE] 🔍 Поиск по телефону: {phone} (чистый: {clean})")
-    
-    # СИНХРОННЫЙ ВЫЗОВ
-    resp = crm_get("/api/v3/search/phone", params={"phone": clean, "limit": 10})
+    r = enqueue_crm_get("/api/v3/search/phone", params={"phone": clean, "limit": 10})
+    if r["status"] != "ok":
+        return "⌛ Ваш запрос в очереди."
+    resp = r["result"]
     
     if isinstance(resp, str):
         return resp
@@ -653,8 +866,10 @@ def search_by_fio(text: str):
             params["father_name"] = parts[2]
         q = {**params, "smart_mode": "true", "limit": 10}
     
-    # СИНХРОННЫЙ ВЫЗОВ
-    resp = crm_get("/api/v3/search/fio", params=q)
+    r = enqueue_crm_get("/api/v3/search/fio", params=q)
+    if r["status"] != "ok":
+        return "⌛ Ваш запрос в очереди."
+    resp = r["result"]
     
     if isinstance(resp, str):
         return resp
@@ -680,7 +895,7 @@ def search_by_fio(text: str):
     
     return "📌 Результаты поиска по ФИО:\n\n" + "\n".join(results)
 
-# ================== 8. FLASK APP ==================
+# ================== 9. FLASK APP ==================
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
@@ -744,56 +959,67 @@ def start_session():
 
 @app.before_request
 def validate_session():
-    # ВРЕМЕННО ОТКЛЮЧЕНО ДЛЯ ТЕСТОВ - ВСЯ ПРОВЕРКА ВЫКЛЮЧЕНА
-    # Вставь этот код вместо старой функции validate_session()
-    pass
+    if request.path == "/api/search" and request.method == "POST":
+        data = request.json or {}
+        uid = data.get("telegram_user_id")
+        token = data.get("session_token")
+        
+        if not uid or not token:
+            return jsonify({"error": "Не указаны учетные данные"}), 403
+        
+        try:
+            uid_int = int(uid)
+            session = active_sessions.get(uid_int)
+            if not session:
+                return jsonify({"error": "Сессия не найдена."}), 403
+            if session["token"] != token:
+                return jsonify({"error": "Сессия недействительна."}), 403
+            if time.time() - session["created"] > SESSION_TTL:
+                del active_sessions[uid_int]
+                return jsonify({"error": "Сессия истекла."}), 403
+        except ValueError:
+            return jsonify({"error": "Неверный Telegram ID"}), 400
 
 @app.route('/api/search', methods=['POST'])
 def api_search():
-    # ВРЕМЕННО ОТКЛЮЧАЕМ ПРОВЕРКУ АВТОРИЗАЦИИ
     data = request.json
-    query = data.get('query', '').strip()
+    user_id = data.get('telegram_user_id')
     
+    if not user_id:
+        return jsonify({"error": "Ошибка авторизации."}), 403
+    
+    query = data.get('query', '').strip()
     if not query:
         return jsonify({"error": "Пустой запрос"}), 400
     
     print(f"\n" + "=" * 60)
-    print(f"[SEARCH] 🔍 Тестовый поиск (защита отключена): {query}")
+    print(f"[SEARCH] 🔍 Пользователь {user_id} ищет: {query}")
     print("=" * 60)
     
-    try:
-        if query.isdigit() and len(query) == 12:
-            reply = search_by_iin(query)
-        elif query.startswith(("+", "8", "7")):
-            reply = search_by_phone(query)
-        else:
-            reply = search_by_fio(query)
-        
-        print(f"[SEARCH] ✅ Ответ готов, длина: {len(reply)} символов")
-        print("=" * 60)
-        
-        return jsonify({"result": reply})
-        
-    except Exception as e:
-        print(f"[SEARCH] ❌ Ошибка: {e}")
-        traceback.print_exc()
-        return jsonify({"error": "Внутренняя ошибка сервера"}), 500
+    if query.isdigit() and len(query) == 12:
+        reply = search_by_iin(query)
+    elif query.startswith(("+", "8", "7")):
+        reply = search_by_phone(query)
+    else:
+        reply = search_by_fio(query)
+    
+    print(f"[SEARCH] ✅ Ответ готов, длина: {len(reply)} символов")
+    print("=" * 60)
+    
+    return jsonify({"result": reply})
 
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    with PW_SESSIONS_LOCK:
-        session_count = len(pw_sessions)
+@app.route('/api/queue-size', methods=['GET'])
+def queue_size():
+    return jsonify({"queue_size": crm_queue.qsize()})
+
+@app.route('/api/refresh-users', methods=['POST'])
+def refresh_users():
+    auth_header = request.headers.get('Authorization')
+    if auth_header != f"Bearer {SECRET_TOKEN}":
+        return jsonify({"error": "Forbidden"}), 403
     
-    status = "ok" if session_count > 0 else "error"
-    print(f"[HEALTH] Статус: {status}, Сессий: {session_count}")
-    
-    return jsonify({
-        "status": status,
-        "sessions": session_count,
-        "active_flask_sessions": len(active_sessions),
-        "allowed_users": len(ALLOWED_USER_IDS),
-        "timestamp": datetime.now().isoformat()
-    })
+    load_allowed_users()
+    return jsonify({"ok": True, "count": len(ALLOWED_USER_IDS)})
 
 @app.route('/api/debug/sessions', methods=['GET'])
 def debug_sessions():
@@ -816,24 +1042,34 @@ def debug_sessions():
                 "age_seconds": int(time.time()) - s.get("created_at", 0)
             })
     
-    # Также показываем thread-local сессии
-    thread_sessions = []
-    try:
-        if hasattr(thread_local, 'session'):
-            s = thread_local.session
-            thread_sessions.append({
-                "thread": threading.current_thread().name,
-                "username": s.get("username"),
-                "has_context": "context" in s
-            })
-    except:
-        pass
+    return jsonify({
+        "active_sessions_count": len(pw_sessions),
+        "sessions": sessions_info,
+        "queue_size": crm_queue.qsize(),
+        "active_flask_sessions": len(active_sessions)
+    })
+
+@app.route('/api/debug/test-search', methods=['POST'])
+def debug_test_search():
+    auth_header = request.headers.get('Authorization')
+    if auth_header != f"Bearer {SECRET_TOKEN}":
+        return jsonify({"error": "Forbidden"}), 403
+    
+    data = request.json or {}
+    query = data.get('query', '931229400494')
+    
+    print(f"[DEBUG] Тестовый поиск: {query}")
+    
+    if query.isdigit() and len(query) == 12:
+        result = search_by_iin(query)
+    elif query.startswith(("+", "8", "7")):
+        result = search_by_phone(query)
+    else:
+        result = search_by_fio(query)
     
     return jsonify({
-        "global_sessions_count": len(pw_sessions),
-        "global_sessions": sessions_info,
-        "thread_local_sessions": thread_sessions,
-        "active_flask_sessions": len(active_sessions)
+        "query": query,
+        "result": result
     })
 
 @app.route('/api/debug/init-sessions', methods=['POST'])
@@ -857,13 +1093,28 @@ def debug_init_sessions():
             "error": str(e)
         }), 500
 
-# ================== 9. ЗАПУСК СЕРВЕРА ==================
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    with PW_SESSIONS_LOCK:
+        session_count = len(pw_sessions)
+    
+    status = "ok" if session_count > 0 else "error"
+    print(f"[HEALTH] Статус: {status}, Сессий: {session_count}")
+    
+    return jsonify({
+        "status": status,
+        "sessions": session_count,
+        "queue": crm_queue.qsize(),
+        "active_flask_sessions": len(active_sessions),
+        "allowed_users": len(ALLOWED_USER_IDS),
+        "timestamp": datetime.now().isoformat()
+    })
+
+# ================== 10. ЗАПУСК СЕРВЕРА ==================
 print("\n" + "=" * 60)
-print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА (ЗАЩИТА ОТКЛЮЧЕНА ДЛЯ ТЕСТОВ)")
+print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА С УЛУЧШЕНИЯМИ")
 print("=" * 60)
-print("Режим: синхронные запросы с thread-local сессиями")
-print("Исправлена ошибка: UnboundLocalError и cannot switch thread")
-print("⚠️ ЗАЩИТА ОТКЛЮЧЕНА - ДЛЯ ТЕСТИРОВАНИЯ ⚠️")
+print("⚠️ ВНИМАНИЕ: Используем улучшенный код из локального теста")
 print("=" * 60)
 
 # Загружаем разрешенных пользователей
@@ -876,7 +1127,7 @@ init_success = init_token_pool()
 if not init_success:
     print("\n⚠️ ВНИМАНИЕ: Не удалось создать сессии!")
 else:
-    print("\n✅ СЕРВЕР ГОТОВ К РАБОТЕ (ЗАЩИТА ОТКЛЮЧЕНА)!")
+    print("\n✅ СЕРВЕР ГОТОВ К РАБОТЕ!")
 
 def cleanup_sessions():
     while True:
@@ -892,9 +1143,5 @@ Thread(target=cleanup_sessions, daemon=True).start()
 if __name__ == "__main__":
     print(f"\n🌐 Сервер запущен!")
     print(f"📋 Проверка: curl https://api.reft.site/api/health")
-    print("⚠️ ЗАЩИТА ОТКЛЮЧЕНА - тестируй запросы напрямую")
-    print("\n✅ Готов к работе!")
-    
-    # Запускаем Flask в режиме без перезагрузки
-    from werkzeug.serving import run_simple
-    run_simple('0.0.0.0', 5000, app, threaded=True, use_reloader=False)
+    print("\n✅ Готов к работе с Telegram мини-приложением!")
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
