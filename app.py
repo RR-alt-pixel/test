@@ -7,8 +7,12 @@ import traceback
 import hashlib
 import threading
 import queue
+import signal
+import sys
+import gc
+import resource
 from threading import Thread, Lock, Event
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Optional, Dict, List, Any
 from urllib.parse import urlencode, urljoin
 from datetime import datetime
 import logging
@@ -16,7 +20,7 @@ import logging
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
 
 # ================== 1. НАСТРОЙКИ ==================
 BOT_TOKEN = "8545598161:AAGM6HtppAjUOuSAYH0mX5oNcPU0SuO59N4"
@@ -47,12 +51,12 @@ accounts = [
     {"username": "klon9", "password": "7755SSaa"},
 ]
 
-# ================== 3. PLAYWRIGHT В ОДНОМ ПОТОКЕ ==================
+# ================== 3. PLAYWRIGHT В ОДНОМ ПОТОКЕ (ИСПРАВЛЕННЫЙ) ==================
 class PlaywrightWorker:
-    """Рабочий поток для ВСЕХ Playwright операций"""
+    """Рабочий поток для ВСЕХ Playwright операций - оптимизирован для малой памяти"""
     def __init__(self):
-        self.task_queue = queue.Queue()
-        self.result_queues = {}  # task_id -> queue.Queue для результата
+        self.task_queue = queue.Queue(maxsize=100)
+        self.result_queues = {}
         self.task_counter = 0
         self.task_lock = Lock()
         self.worker_thread = None
@@ -79,7 +83,14 @@ class PlaywrightWorker:
         logger.info("✅ Рабочий поток запущен")
         
     def _worker_loop(self):
-        """Главный цикл рабочего потока - ВСЕ Playwright операции здесь!"""
+        """Главный цикл рабочего потока - оптимизирован для малой памяти"""
+        # Увеличиваем лимит файловых дескрипторов
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (65536, 65536))
+            logger.info("✅ Лимит файловых дескрипторов увеличен до 65536")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось увеличить лимит файловых дескрипторов: {e}")
+        
         logger.info("🚀 Запуск Playwright в рабочем потоке...")
         
         try:
@@ -88,90 +99,102 @@ class PlaywrightWorker:
             self.playwright = sync_playwright().start()
             logger.info("✅ Playwright запущен")
             
-            # 2. Запуск браузера
-            logger.info("Запуск браузера...")
+            # 2. Запуск браузера в УЛЬТРА-ЛЕГКОМ режиме
+            logger.info("Запуск браузера в легком режиме...")
             self.browser = self.playwright.chromium.launch(
                 headless=True,
                 args=[
+                    # Безопасность
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
+                    
+                    # Оптимизация памяти
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
-                    "--disable-blink-features=AutomationControlled",
-                    "--window-size=1920,1080",
-                    "--disable-web-security",
-                    "--disable-features=IsolateOrigins,site-per-process",
-                    "--disable-site-isolation-trials"
-                ]
+                    "--single-process",          # ВАЖНО: только один процесс
+                    "--no-zygote",              # ВАЖНО: без зиготы
+                    "--no-first-run",
+                    
+                    # Отключение ненужного
+                    "--disable-extensions",
+                    "--disable-plugins",
+                    "--disable-background-networking",
+                    "--disable-default-apps",
+                    "--disable-component-update",
+                    "--disable-sync",
+                    "--disable-translate",
+                    
+                    # Отключение фич для экономии памяти
+                    "--disable-features=AudioServiceOutOfProcess,TranslateUI",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding",
+                    "--disable-ipc-flooding-protection",
+                    
+                    # Дополнительная оптимизация
+                    "--disable-background-timer-throttling",
+                    "--disable-client-side-phishing-detection",
+                    "--disable-hang-monitor",
+                    "--disable-popup-blocking",
+                    "--disable-prompt-on-repost",
+                    "--disable-domain-reliability",
+                    "--disable-speech-api",
+                    
+                    # Разрешение
+                    "--window-size=1280,720",
+                    "--use-gl=egl"
+                ],
+                # Дополнительные настройки
+                chromium_sandbox=False,
+                handle_sigint=False,
+                handle_sigterm=False,
+                handle_sighup=False,
+                timeout=60000
             )
-            logger.info("✅ Браузер запущен")
+            logger.info("✅ Браузер запущен в легком режиме")
             
-            # 3. Создание контекста
+            # 3. Создание контекста с минимальными настройками
             logger.info("Создание контекста...")
             self.context = self.browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                viewport={"width": 1920, "height": 1080},
+                viewport={"width": 1280, "height": 720},
                 locale="ru-RU",
                 timezone_id="Europe/Moscow",
                 ignore_https_errors=True,
+                # Минимальные настройки
+                java_script_enabled=True,
+                bypass_csp=False,
+                has_touch=False,
+                is_mobile=False,
+                device_scale_factor=1,
+                # Убираем лишнее
+                storage_state=None,
+                permissions=[]
             )
             logger.info("✅ Контекст создан")
             
             # 4. Создание страницы
             self.page = self.context.new_page()
             
-            # 5. Добавляем anti-detection скрипты
+            # 5. Минимальные anti-detection скрипты
             self.page.add_init_script("""
-                // Удаляем webdriver
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'plugins', { 
+                    get: () => [{ 
+                        0: {type: "application/pdf"}, 
+                        length: 1,
+                        item: function() { return null; }
+                    }] 
                 });
-                
-                // Переопределяем plugins
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [{
-                        0: {type: "application/x-google-chrome-pdf"},
-                        1: {type: "application/pdf"},
-                        length: 2,
-                        item: function(index) { return this[index] || null; },
-                        namedItem: function() { return null; },
-                        refresh: function() {}
-                    }]
-                });
-                
-                // Переопределяем languages
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['ru-RU', 'ru', 'en-US', 'en']
-                });
-                
-                // Добавляем chrome объект
-                window.chrome = {
-                    runtime: {},
-                    loadTimes: function() {},
-                    csi: function() {},
-                    app: {}
-                };
-                
-                // Переопределяем WebGL
-                const getParameter = WebGLRenderingContext.prototype.getParameter;
-                WebGLRenderingContext.prototype.getParameter = function(parameter) {
-                    if (parameter === 37445) return 'Intel Inc.';
-                    if (parameter === 37446) return 'Intel Iris OpenGL Engine';
-                    return getParameter(parameter);
-                };
-                
-                // Переопределяем permissions
-                const originalQuery = navigator.permissions.query;
-                navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications' ?
-                        Promise.resolve({ state: Notification.permission }) :
-                        originalQuery(parameters)
-                );
             """)
             
             # 6. Логин в систему
             logger.info("🔐 Выполняем логин...")
-            self._login()
+            login_success = self._login()
+            
+            if not login_success:
+                logger.error("❌ Не удалось выполнить логин")
+                self.init_event.set()
+                return
             
             logger.info("✅ Инициализация завершена!")
             self.init_event.set()
@@ -179,17 +202,24 @@ class PlaywrightWorker:
             # 7. Основной цикл обработки задач
             while self.is_running:
                 try:
-                    task = self.task_queue.get(timeout=1)
+                    task = self.task_queue.get(timeout=0.5)
                     task_id, task_type, task_data, result_queue = task
                     
-                    logger.info(f"📥 Получена задача {task_id}: {task_type}")
+                    logger.debug(f"📥 Получена задача {task_id}: {task_type}")
                     
                     try:
+                        # Принудительная сборка мусора перед задачей
+                        gc.collect()
+                        
                         result = self._process_task(task_type, task_data)
-                        logger.info(f"✅ Задача {task_id} выполнена успешно")
+                        
+                        # Принудительная сборка мусора после задачи
+                        gc.collect()
+                        
+                        logger.debug(f"✅ Задача {task_id} выполнена")
                         result_queue.put((task_id, {"success": True, "data": result}))
                     except Exception as e:
-                        logger.error(f"❌ Ошибка в задаче {task_id}: {str(e)}")
+                        logger.error(f"❌ Ошибка в задаче {task_id}: {str(e)[:200]}")
                         result_queue.put((task_id, {
                             "success": False, 
                             "error": str(e),
@@ -201,7 +231,7 @@ class PlaywrightWorker:
                 except queue.Empty:
                     continue
                 except Exception as e:
-                    logger.error(f"❌ Ошибка в цикле обработки задач: {e}")
+                    logger.error(f"❌ Ошибка в цикле обработки: {e}")
                     
         except Exception as e:
             logger.error(f"❌ Критическая ошибка в рабочем потоке: {e}")
@@ -212,54 +242,48 @@ class PlaywrightWorker:
         """Логин в pena.rest"""
         for attempt in range(self.max_login_attempts):
             try:
-                logger.info(f"Попытка логина #{attempt + 1}")
+                logger.info(f"🔐 Попытка логина #{attempt + 1}")
                 
-                # Очищаем куки перед логином
+                # Очищаем куки
                 self.context.clear_cookies()
+                time.sleep(1)
                 
                 # Переходим на страницу логина
-                logger.info(f"Переход на {LOGIN_PAGE}")
-                self.page.goto(LOGIN_PAGE, wait_until="networkidle", timeout=60000)
+                logger.info(f"🌐 Переход на {LOGIN_PAGE}")
+                self.page.goto(LOGIN_PAGE, wait_until="domcontentloaded", timeout=30000)
                 time.sleep(2)
                 
-                # Проверяем, не появилась ли капча
+                # Проверяем капчу
                 page_content = self.page.content()
-                if "captcha" in page_content.lower() or "капча" in page_content.lower():
-                    logger.warning("⚠️ Обнаружена капча!")
-                    time.sleep(5)
+                if any(word in page_content.lower() for word in ["captcha", "капча", "robot", "робот"]):
+                    logger.warning("⚠️ Обнаружена капча! Ждем 10 секунд...")
+                    time.sleep(10)
                     continue
                 
                 # Заполняем логин
-                logger.info(f"Ввод логина: {accounts[0]['username']}")
+                logger.info(f"👤 Ввод логина: {accounts[0]['username']}")
                 self.page.fill(LOGIN_SELECTOR, accounts[0]["username"])
-                time.sleep(random.uniform(0.5, 1.5))
+                time.sleep(random.uniform(0.3, 0.7))
                 
                 # Заполняем пароль
-                logger.info("Ввод пароля")
+                logger.info("🔑 Ввод пароля")
                 self.page.fill(PASSWORD_SELECTOR, accounts[0]["password"])
-                time.sleep(random.uniform(0.5, 1.5))
+                time.sleep(random.uniform(0.3, 0.7))
                 
                 # Нажимаем кнопку
-                logger.info("Нажатие кнопки входа")
+                logger.info("🖱️ Нажатие кнопки входа")
                 self.page.click(SIGN_IN_BUTTON_SELECTOR)
                 time.sleep(3)
                 
-                # Ждем редиректа
+                # Проверяем успешность
                 current_url = self.page.url
-                logger.info(f"Текущий URL: {current_url}")
+                logger.info(f"📍 Текущий URL: {current_url}")
                 
-                # Проверяем успешность логина
-                if "dashboard" in current_url or "search" in current_url:
+                if any(keyword in current_url for keyword in ["dashboard", "search", "main"]):
                     logger.info("✅ Логин успешен")
                     
-                    # Даем время для загрузки всех ресурсов
-                    time.sleep(2)
-                    
-                    # Переходим на страницу поиска
-                    search_url = f"{BASE_URL}/dashboard/search"
-                    logger.info(f"Переход на {search_url}")
-                    self.page.goto(search_url, wait_until="networkidle", timeout=30000)
-                    time.sleep(2)
+                    # Краткая пауза
+                    time.sleep(1)
                     
                     # Получаем cookies
                     cookies_list = self.context.cookies()
@@ -271,109 +295,41 @@ class PlaywrightWorker:
                     # Создаем заголовки
                     self._create_headers()
                     
-                    logger.info(f"✅ Логин завершен успешно")
-                    logger.info(f"📦 Получено cookies: {len(self.cookies)}")
-                    logger.info(f"🔑 Fingerprint: {self.fingerprint[:30]}..." if self.fingerprint else "Нет fingerprint")
+                    logger.info(f"📊 Cookies: {len(self.cookies)} шт")
                     
-                    # Проверяем важные куки
-                    important_cookies = ['cf_clearance', 'aegis_session', 'access_token', 'session']
+                    # Логируем важные куки
+                    important_cookies = ['cf_clearance', 'aegis_session', 'access_token']
                     for cookie_name in important_cookies:
                         if cookie_name in self.cookies:
                             value = self.cookies[cookie_name]
-                            logger.info(f"🍪 {cookie_name}: {value[:50]}...")
-                        else:
-                            logger.warning(f"🍪 {cookie_name}: НЕТ")
+                            logger.info(f"🍪 {cookie_name}: {value[:20]}...")
                     
                     return True
                 else:
-                    logger.warning(f"⚠️ Не удалось войти, URL: {current_url}")
-                    
-                    # Делаем скриншот для отладки
-                    try:
-                        screenshot_path = f"login_failure_attempt_{attempt}.png"
-                        self.page.screenshot(path=screenshot_path)
-                        logger.info(f"📸 Скриншот сохранен: {screenshot_path}")
-                    except:
-                        pass
-                    
-                    time.sleep(3)
+                    logger.warning(f"⚠️ Логин неудачен, URL: {current_url[:50]}...")
+                    time.sleep(2)
                     
             except Exception as e:
                 logger.error(f"❌ Ошибка при логине (попытка {attempt + 1}): {e}")
-                traceback.print_exc()
-                time.sleep(5)
+                time.sleep(2)
         
-        raise Exception(f"Не удалось войти после {self.max_login_attempts} попыток")
+        logger.error("❌ Все попытки логина провалились")
+        return False
     
     def _generate_fingerprint(self):
         """Генерация fingerprint"""
         try:
-            logger.info("Генерация fingerprint...")
-            
-            # Пробуем получить из localStorage
-            fingerprint = self.page.evaluate("""
-                () => {
-                    try {
-                        // Ищем fingerprint в различных местах
-                        const keys = Object.keys(window);
-                        for (const key of keys) {
-                            const value = window[key];
-                            if (typeof value === 'string' && value.length === 64 && /^[a-f0-9]{64}$/i.test(value)) {
-                                return value;
-                            }
-                        }
-                        
-                        // Ищем в localStorage
-                        for (let i = 0; i < localStorage.length; i++) {
-                            const key = localStorage.key(i);
-                            const value = localStorage.getItem(key);
-                            if (value && value.length === 64 && /^[a-f0-9]{64}$/i.test(value)) {
-                                return value;
-                            }
-                        }
-                        
-                        return null;
-                    } catch(e) {
-                        return null;
-                    }
-                }
-            """)
-            
-            if fingerprint:
-                logger.info(f"✅ Найден fingerprint в браузере: {fingerprint[:30]}...")
-                return fingerprint
-            
-            # Генерируем свой fingerprint
-            logger.info("Генерация нового fingerprint...")
-            browser_data = self.page.evaluate("""
-                () => ({
-                    userAgent: navigator.userAgent,
-                    platform: navigator.platform,
-                    languages: navigator.languages.join(','),
-                    hardwareConcurrency: navigator.hardwareConcurrency,
-                    deviceMemory: navigator.deviceMemory || 4,
-                    screen: `${screen.width}x${screen.height}`,
-                    colorDepth: screen.colorDepth,
-                    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-                    sessionStorage: sessionStorage.length,
-                    localStorage: localStorage.length,
-                    timestamp: Date.now(),
-                    random: Math.random().toString(36).substring(2, 15)
-                })
-            """)
-            
-            data_str = json.dumps(browser_data, sort_keys=True) + accounts[0]["username"] + str(int(time.time()))
-            fingerprint = hashlib.sha256(data_str.encode()).hexdigest()
-            
-            logger.info(f"📝 Сгенерирован fingerprint: {fingerprint[:30]}...")
-            return fingerprint
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка генерации fingerprint: {e}")
-            # Фоллбэк
-            fingerprint = hashlib.sha256(f"{int(time.time())}{random.randint(1000, 9999)}{accounts[0]['username']}".encode()).hexdigest()
-            logger.info(f"📝 Фоллбэк fingerprint: {fingerprint[:30]}...")
-            return fingerprint
+            # Простая генерация чтобы не нагружать память
+            data = {
+                "username": accounts[0]["username"],
+                "timestamp": int(time.time()),
+                "random": random.randint(1000, 9999),
+                "user_agent": "Chrome/120.0.0.0"
+            }
+            data_str = json.dumps(data, sort_keys=True)
+            return hashlib.sha256(data_str.encode()).hexdigest()
+        except:
+            return hashlib.sha256(f"{int(time.time())}{random.randint(1000, 9999)}".encode()).hexdigest()
     
     def _create_headers(self):
         """Создание заголовков для запросов"""
@@ -381,10 +337,8 @@ class PlaywrightWorker:
         
         self.headers = {
             "accept": "application/json, text/plain, */*",
-            "accept-encoding": "gzip, deflate, br",
-            "accept-language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+            "accept-language": "ru-RU,ru;q=0.9",
             "content-type": "application/json",
-            "priority": "u=1, i",
             "referer": f"{BASE_URL}/dashboard/search",
             "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
             "sec-ch-ua-mobile": "?0",
@@ -395,11 +349,8 @@ class PlaywrightWorker:
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "x-device-fingerprint": self.fingerprint or "",
             "cookie": cookie_header,
-            "x-requested-with": "XMLHttpRequest",
-            "origin": BASE_URL
+            "x-requested-with": "XMLHttpRequest"
         }
-        
-        logger.info(f"📋 Созданы заголовки, cookies: {len(self.cookies)}")
     
     def _process_task(self, task_type: str, task_data: Any):
         """Обработка задачи"""
@@ -425,57 +376,26 @@ class PlaywrightWorker:
             query_string = urlencode(params, doseq=True)
             url = f"{url}?{query_string}" if "?" not in url else f"{url}&{query_string}"
         
-        logger.info(f"📡 Запрос к: {url}")
-        logger.info(f"📋 Параметры: {params}")
-        logger.info(f"🔑 Fingerprint: {self.fingerprint[:20] if self.fingerprint else 'НЕТ'}")
+        logger.info(f"📡 Запрос: {url[:80]}...")
         
-        # Показываем важные куки
-        important_cookies = ['cf_clearance', 'aegis_session', 'access_token', 'session', 'XSRF-TOKEN']
-        logger.info("🍪 Проверка cookies:")
-        for cookie_name in important_cookies:
-            if cookie_name in self.cookies:
-                value = self.cookies[cookie_name]
-                logger.info(f"  ✅ {cookie_name}: {value[:30]}...")
-            else:
-                logger.info(f"  ❌ {cookie_name}: НЕТ")
-        
-        # Делаем запрос
-        logger.info(f"⏳ Отправляем запрос...")
         start_time = time.time()
         
         try:
             response = self.context.request.get(
                 url, 
                 headers=self.headers, 
-                timeout=30000
+                timeout=20000  # Уменьшенный таймаут
             )
             
             elapsed = time.time() - start_time
-            logger.info(f"✅ Ответ получен за {elapsed:.2f} сек")
-            logger.info(f"📊 Статус: {response.status}")
+            logger.info(f"📊 Ответ: {response.status} за {elapsed:.1f}сек")
             
             response_text = response.text()
-            logger.info(f"📏 Длина ответа: {len(response_text)} символов")
-            
-            # Логируем первые 500 символов ответа
-            if response_text:
-                logger.info(f"📄 Начало ответа: {response_text[:500]}")
-            else:
-                logger.info(f"📄 Ответ пустой")
-            
-            # Логируем важные заголовки ответа
-            response_headers = dict(response.headers)
-            logger.info("📋 Заголовки ответа:")
-            for key, value in response_headers.items():
-                key_lower = key.lower()
-                if any(x in key_lower for x in ['content-type', 'content-length', 'set-cookie', 'x-', 'cf-']):
-                    logger.info(f"  {key}: {value}")
             
             result = {
                 "status": response.status,
                 "url": url,
                 "text": response_text,
-                "headers": response_headers,
                 "elapsed": elapsed
             }
             
@@ -483,92 +403,71 @@ class PlaywrightWorker:
                 try:
                     json_data = response.json()
                     result["json"] = json_data
-                    logger.info(f"✅ JSON успешно распарсен")
-                    
                     if isinstance(json_data, list):
-                        logger.info(f"📊 Найдено записей: {len(json_data)}")
-                        if json_data and len(json_data) > 0:
-                            # Показываем первую запись для примера
-                            first_item = json_data[0]
-                            logger.info(f"📝 Пример записи: {json.dumps(first_item, ensure_ascii=False)[:200]}...")
-                    elif isinstance(json_data, dict):
-                        logger.info(f"📊 Ключи: {list(json_data.keys())}")
-                        if 'error' in json_data:
-                            logger.warning(f"⚠️ Ответ содержит ошибку: {json_data.get('error')}")
-                except Exception as json_error:
+                        logger.info(f"📝 Найдено записей: {len(json_data)}")
+                except:
                     result["json"] = None
-                    logger.warning(f"⚠️ Не удалось распарсить JSON: {json_error}")
-                    logger.info(f"📄 Ответ как текст: {response_text[:500]}")
-            elif response.status in [401, 403, 419]:
-                logger.error(f"❌ Ошибка авторизации: {response.status}")
-                result["auth_error"] = True
-                result["error"] = f"Auth error {response.status}: {response_text[:200]}"
             else:
-                result["error"] = response_text[:500]
-                logger.error(f"❌ Ошибка сервера: {response.status}")
-                logger.error(f"📄 Текст ошибки: {response_text[:500]}")
-                
+                result["error"] = response_text[:200]
+                logger.warning(f"⚠️ Ошибка {response.status}")
+            
             return result
             
         except Exception as e:
             elapsed = time.time() - start_time
-            logger.error(f"❌ Исключение при запросе: {e}")
-            logger.error(f"⏱ Время до ошибки: {elapsed:.2f} сек")
-            traceback.print_exc()
+            logger.error(f"❌ Исключение при запросе за {elapsed:.1f}сек: {str(e)[:100]}")
+            
+            # Если EPIPE ошибка - перезапускаем
+            if "EPIPE" in str(e) or "Broken pipe" in str(e):
+                logger.critical("💥 EPIPE/Broken pipe - требуется перезапуск браузера")
+                raise RuntimeError("EPIPE_ERROR")
+            
             raise
     
     def _test_connection(self):
         """Тестовый запрос"""
-        logger.info("🔍 Тестовый запрос соединения")
-        
-        # Тест 1: Проверка доступности сайта
         try:
-            self.page.goto(f"{BASE_URL}/dashboard", wait_until="networkidle", timeout=10000)
-            logger.info("✅ Сайт доступен")
-        except Exception as e:
-            logger.error(f"❌ Сайт недоступен: {e}")
-            return {"status": "error", "site_available": False}
-        
-        # Тест 2: API запрос
-        test_url = urljoin(BASE_URL, "/api/v3/search/iin?iin=931229400494")
-        logger.info(f"🔍 Тестовый API запрос: {test_url}")
-        
-        try:
-            response = self.context.request.get(test_url, headers=self.headers, timeout=15000)
-            logger.info(f"📊 Тестовый статус: {response.status}")
-            
+            test_url = urljoin(BASE_URL, "/api/v3/search/iin?iin=931229400494")
+            response = self.context.request.get(test_url, headers=self.headers, timeout=10000)
             return {
-                "status": "ok" if response.status == 200 else "error",
                 "test_passed": response.status == 200,
-                "response_status": response.status,
-                "response_length": len(response.text())
+                "status": response.status,
+                "elapsed": 0
             }
         except Exception as e:
-            logger.error(f"❌ Ошибка тестового запроса: {e}")
-            return {"status": "error", "test_passed": False, "error": str(e)}
+            return {"test_passed": False, "error": str(e)}
     
     def _get_worker_info(self):
         """Информация о рабочем потоке"""
         return {
             "thread": threading.current_thread().name,
-            "thread_id": threading.get_ident(),
             "cookies_count": len(self.cookies),
-            "important_cookies": {
-                name: (self.cookies.get(name, "")[:30] + "..." if name in self.cookies else "НЕТ")
-                for name in ['cf_clearance', 'aegis_session', 'access_token', 'session']
-            },
-            "fingerprint": self.fingerprint[:30] + "..." if self.fingerprint else None,
+            "fingerprint": self.fingerprint[:20] + "..." if self.fingerprint else None,
             "is_running": self.is_running,
-            "queue_size": self.task_queue.qsize()
+            "queue_size": self.task_queue.qsize(),
+            "memory_usage": self._get_memory_usage()
         }
+    
+    def _get_memory_usage(self):
+        """Получить использование памяти"""
+        try:
+            import psutil
+            process = psutil.Process()
+            return {
+                "rss_mb": process.memory_info().rss / 1024 / 1024,
+                "vms_mb": process.memory_info().vms / 1024 / 1024,
+                "percent": process.memory_percent()
+            }
+        except:
+            return {"error": "psutil not available"}
     
     def _re_login(self):
         """Перелогин"""
-        logger.info("🔄 Выполнение перелогина...")
-        self._login()
-        return {"success": True, "message": "Перелогин выполнен"}
+        logger.info("🔄 Перелогин...")
+        success = self._login()
+        return {"success": success}
     
-    def submit_task(self, task_type: str, task_data: Dict, timeout: int = 30):
+    def submit_task(self, task_type: str, task_data: Dict, timeout: int = 25):
         """Отправить задачу в рабочий поток"""
         with self.task_lock:
             task_id = self.task_counter
@@ -577,55 +476,91 @@ class PlaywrightWorker:
         result_queue = queue.Queue()
         self.result_queues[task_id] = result_queue
         
+        # Проверяем не перегружена ли очередь
+        if self.task_queue.qsize() > 50:
+            logger.warning(f"⚠️ Очередь перегружена: {self.task_queue.qsize()} задач")
+        
         # Отправляем задачу
         self.task_queue.put((task_id, task_type, task_data, result_queue))
-        logger.info(f"📤 Отправлена задача {task_id}: {task_type}")
         
         # Ждем результат
         try:
             result_id, result = result_queue.get(timeout=timeout)
             
             if result_id != task_id:
-                logger.error(f"Несоответствие ID задачи: {result_id} != {task_id}")
-                raise RuntimeError(f"Несоответствие ID задачи: {result_id} != {task_id}")
+                raise RuntimeError(f"Несоответствие ID задачи")
             
-            logger.info(f"📥 Получен результат задачи {task_id}")
             return result
             
         except queue.Empty:
-            logger.error(f"Таймаут ожидания задачи {task_id}")
+            logger.error(f"⏰ Таймаут задачи {task_id}")
             raise TimeoutError(f"Таймаут ожидания задачи {task_id}")
         finally:
-            # Очищаем очередь результата
             with self.task_lock:
                 if task_id in self.result_queues:
                     del self.result_queues[task_id]
     
     def stop(self):
-        """Остановить рабочий поток"""
-        logger.info("🛑 Остановка рабочего потока...")
+        """Корректная остановка рабочего потока"""
+        logger.info("🛑 Корректная остановка PlaywrightWorker...")
         self.is_running = False
-        if self.worker_thread:
+        
+        # Очищаем очередь
+        while not self.task_queue.empty():
+            try:
+                self.task_queue.get_nowait()
+                self.task_queue.task_done()
+            except queue.Empty:
+                break
+        
+        # Ждем завершения потока
+        if self.worker_thread and self.worker_thread.is_alive():
             self.worker_thread.join(timeout=5)
         
+        # Закрываем браузер
         if self.browser:
             try:
                 self.browser.close()
                 logger.info("✅ Браузер закрыт")
-            except:
-                logger.warning("⚠️ Не удалось закрыть браузер")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка закрытия браузера: {e}")
         
+        # Останавливаем Playwright
         if self.playwright:
             try:
                 self.playwright.stop()
                 logger.info("✅ Playwright остановлен")
-            except:
-                logger.warning("⚠️ Не удалось остановить Playwright")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка остановки Playwright: {e}")
+        
+        # Принудительная сборка мусора
+        gc.collect()
+        
+        logger.info("✅ PlaywrightWorker остановлен")
 
 # Глобальный экземпляр рабочего потока
 pw_worker = PlaywrightWorker()
 
-# ================== 4. FLASK API ==================
+# ================== 4. ОБРАБОТЧИКИ СИГНАЛОВ ==================
+def graceful_shutdown(signum, frame):
+    """Корректное завершение работы"""
+    logger.info(f"📴 Получен сигнал {signum}, завершаем работу...")
+    
+    # Останавливаем Playwright worker
+    if 'pw_worker' in globals():
+        pw_worker.stop()
+    
+    # Даем время на завершение
+    time.sleep(1)
+    
+    logger.info("✅ Корректное завершение выполнено")
+    sys.exit(0)
+
+# Регистрируем обработчики сигналов
+signal.signal(signal.SIGTERM, graceful_shutdown)
+signal.signal(signal.SIGINT, graceful_shutdown)
+
+# ================== 5. FLASK API ==================
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
@@ -640,61 +575,66 @@ class ResponseLike:
             raise ValueError("No JSON")
         return self._json_data
 
-def crm_get(endpoint: str, params: dict = None):
-    """API запрос через Playwright worker"""
-    logger.info(f"📨 CRM GET: {endpoint}, params: {params}")
+def crm_get(endpoint: str, params: dict = None, max_retries: int = 2):
+    """API запрос через Playwright worker с повторными попытками"""
+    for retry in range(max_retries + 1):
+        try:
+            result = pw_worker.submit_task("api_request", {
+                "endpoint": endpoint,
+                "params": params
+            }, timeout=25)
+            
+            if result["success"]:
+                data = result["data"]
+                
+                # Проверяем ошибку авторизации
+                if data.get("status") in [401, 403, 419]:
+                    logger.warning(f"⚠️ Ошибка авторизации {data['status']}")
+                    if retry < max_retries:
+                        logger.info("🔄 Пробуем перелогин...")
+                        try:
+                            relogin_result = pw_worker.submit_task("re_login", {}, timeout=20)
+                            if relogin_result.get("success"):
+                                continue  # Повторяем запрос
+                        except:
+                            pass
+                
+                return ResponseLike(
+                    status_code=data["status"],
+                    text=data["text"],
+                    json_data=data.get("json")
+                )
+            else:
+                error_msg = result.get('error', 'Unknown error')
+                
+                # Если EPIPE ошибка - перезапускаем worker
+                if "EPIPE_ERROR" in error_msg and retry < max_retries:
+                    logger.critical("💥 EPIPE ошибка, перезапускаем worker...")
+                    pw_worker.stop()
+                    time.sleep(3)
+                    pw_worker.start()
+                    pw_worker.init_event.wait(30)
+                    continue
+                
+                logger.error(f"❌ Ошибка в CRM GET: {error_msg}")
+                return ResponseLike(500, error_msg)
+                
+        except TimeoutError as e:
+            logger.error(f"⏰ Таймаут в CRM GET (попытка {retry + 1}): {e}")
+            if retry < max_retries:
+                time.sleep(1)
+                continue
+            return ResponseLike(504, "Таймаут запроса")
+        except Exception as e:
+            logger.error(f"❌ Исключение в CRM GET (попытка {retry + 1}): {e}")
+            if retry < max_retries:
+                time.sleep(1)
+                continue
+            return ResponseLike(500, str(e))
     
-    try:
-        result = pw_worker.submit_task("api_request", {
-            "endpoint": endpoint,
-            "params": params
-        }, timeout=30)
-        
-        if result["success"]:
-            data = result["data"]
-            
-            # Проверяем ошибку авторизации
-            if data.get("auth_error"):
-                logger.warning("⚠️ Обнаружена ошибка авторизации, пробуем перелогин...")
-                # Пробуем перелогин
-                try:
-                    relogin_result = pw_worker.submit_task("re_login", {}, timeout=30)
-                    if relogin_result.get("success"):
-                        logger.info("✅ Перелогин успешен, повторяем запрос...")
-                        # Повторяем запрос
-                        result = pw_worker.submit_task("api_request", {
-                            "endpoint": endpoint,
-                            "params": params
-                        }, timeout=30)
-                        if result["success"]:
-                            data = result["data"]
-                        else:
-                            return ResponseLike(500, result.get("error", "Auth error after relogin"))
-                    else:
-                        return ResponseLike(401, "Требуется повторная авторизация")
-                except Exception as relogin_error:
-                    logger.error(f"❌ Ошибка при перелогине: {relogin_error}")
-                    return ResponseLike(401, "Ошибка авторизации")
-            
-            return ResponseLike(
-                status_code=data["status"],
-                text=data["text"],
-                json_data=data.get("json")
-            )
-        else:
-            error_msg = result.get('error', 'Unknown error')
-            logger.error(f"❌ Ошибка в CRM GET: {error_msg}")
-            return ResponseLike(500, error_msg)
-            
-    except TimeoutError as e:
-        logger.error(f"⏰ Таймаут в CRM GET: {e}")
-        return ResponseLike(504, "Таймаут запроса")
-    except Exception as e:
-        logger.error(f"❌ Исключение в CRM GET: {e}")
-        traceback.print_exc()
-        return ResponseLike(500, str(e))
+    return ResponseLike(500, "Все попытки запроса провалились")
 
-# ================== 5. ПОИСКОВЫЕ ФУНКЦИИ ==================
+# ================== 6. ПОИСКОВЫЕ ФУНКЦИИ ==================
 def search_by_iin(iin: str):
     logger.info(f"🔍 Поиск по ИИН: {iin}")
     
@@ -705,12 +645,12 @@ def search_by_iin(iin: str):
     if resp.status_code == 404:
         return "⚠️ Ничего не найдено по ИИН."
     if resp.status_code != 200:
-        return f"❌ Ошибка {resp.status_code}: {resp.text[:100] if hasattr(resp, 'text') else ''}"
+        return f"❌ Ошибка {resp.status_code}"
     
     try:
         data = resp.json()
     except:
-        return f"❌ Не удалось распарсить ответ: {resp.text[:200]}"
+        return f"❌ Не удалось распарсить ответ"
     
     if not isinstance(data, list) or not data:
         return "⚠️ Ничего не найдено по ИИН."
@@ -724,8 +664,6 @@ def search_by_iin(iin: str):
             result += f"\n   📱 {p.get('phone_number','')}"
         if p.get('birthday'):
             result += f"\n   📅 {p.get('birthday','')}"
-        if p.get('source'):
-            result += f"\n   📍 Источник: {p.get('source')}"
         results.append(result)
     
     return "\n\n".join(results)
@@ -744,12 +682,12 @@ def search_by_phone(phone: str):
     if resp.status_code == 404:
         return f"⚠️ Ничего не найдено по номеру {phone}"
     if resp.status_code != 200:
-        return f"❌ Ошибка {resp.status_code}: {resp.text[:100] if hasattr(resp, 'text') else ''}"
+        return f"❌ Ошибка {resp.status_code}"
     
     try:
         data = resp.json()
     except:
-        return f"❌ Не удалось распарсить ответ: {resp.text[:200]}"
+        return f"❌ Не удалось распарсить ответ"
     
     if not isinstance(data, list) or not data:
         return f"⚠️ Ничего не найдено по номеру {phone}"
@@ -761,8 +699,6 @@ def search_by_phone(phone: str):
             result += f"\n   👤 {p.get('snf','')}"
         if p.get('iin'):
             result += f"\n   🧾 ИИН: {p.get('iin','')}"
-        if p.get('source'):
-            result += f"\n   📍 Источник: {p.get('source')}"
         results.append(result)
     
     return "\n\n".join(results)
@@ -793,12 +729,12 @@ def search_by_fio(text: str):
     if resp.status_code == 404:
         return "⚠️ Ничего не найдено."
     if resp.status_code != 200:
-        return f"❌ Ошибка {resp.status_code}: {resp.text[:100] if hasattr(resp, 'text') else ''}"
+        return f"❌ Ошибка {resp.status_code}"
     
     try:
         data = resp.json()
     except:
-        return f"❌ Не удалось распарсить ответ: {resp.text[:200]}"
+        return f"❌ Не удалось распарсить ответ"
     
     if not isinstance(data, list) or not data:
         return "⚠️ Ничего не найдено."
@@ -812,26 +748,11 @@ def search_by_fio(text: str):
             result += f"\n   📅 Дата рождения: {p.get('birthday','')}"
         if p.get('phone_number'):
             result += f"\n   📱 Телефон: {p.get('phone_number','')}"
-        if p.get('source'):
-            result += f"\n   📍 Источник: {p.get('source')}"
         results.append(result)
     
     return "📌 Результаты поиска по ФИО:\n\n" + "\n".join(results)
 
-# ================== 6. FLASK РОУТИНГ ==================
-@app.before_request
-def log_request_info():
-    """Логирование входящих запросов"""
-    logger.info(f"📥 Входящий запрос: {request.method} {request.path}")
-    if request.method in ['POST', 'PUT'] and request.is_json:
-        logger.info(f"📄 Тело запроса: {request.json}")
-
-@app.after_request
-def log_response_info(response):
-    """Логирование исходящих ответов"""
-    logger.info(f"📤 Исходящий ответ: {response.status}")
-    return response
-
+# ================== 7. FLASK РОУТИНГ ==================
 @app.route('/api/search', methods=['POST'])
 def api_search():
     """Основной поисковый эндпоинт"""
@@ -841,10 +762,9 @@ def api_search():
     if not query:
         return jsonify({"error": "Пустой запрос"}), 400
     
-    logger.info(f"\n{'='*60}")
-    logger.info(f"🔍 Поисковый запрос: {query}")
-    logger.info(f"📊 Поток Flask: {threading.current_thread().name}")
-    logger.info(f"{'='*60}")
+    logger.info(f"\n{'='*50}")
+    logger.info(f"🔍 Поиск: {query}")
+    logger.info(f"{'='*50}")
     
     try:
         if query.isdigit() and len(query) == 12:
@@ -854,21 +774,20 @@ def api_search():
         else:
             reply = search_by_fio(query)
         
-        logger.info(f"✅ Ответ готов, длина: {len(reply)} символов")
-        logger.info(f"{'='*60}")
+        logger.info(f"✅ Ответ готов ({len(reply)} символов)")
+        logger.info(f"{'='*50}")
         
         return jsonify({"result": reply})
         
     except Exception as e:
         logger.error(f"❌ Ошибка поиска: {e}")
-        traceback.print_exc()
         return jsonify({"error": "Внутренняя ошибка сервера"}), 500
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Проверка здоровья сервиса"""
     try:
-        # Тестируем соединение через worker
+        # Быстрый тест
         result = pw_worker.submit_task("test_connection", {}, timeout=10)
         
         info = {}
@@ -887,43 +806,25 @@ def health_check():
             "worker_initialized": pw_worker.init_event.is_set(),
             "test_passed": test_passed,
             "worker_info": info,
-            "queue_size": pw_worker.task_queue.qsize(),
             "timestamp": datetime.now().isoformat()
         })
     except Exception as e:
         return jsonify({
             "status": "error",
             "error": str(e),
-            "worker_running": pw_worker.is_running,
             "timestamp": datetime.now().isoformat()
         }), 500
 
-@app.route('/api/debug/worker', methods=['GET'])
-def debug_worker():
-    """Информация о рабочем потоке"""
-    try:
-        info = pw_worker.submit_task("get_info", {}, timeout=5)
-        return jsonify({
-            "success": True,
-            "worker_info": info
-        })
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-@app.route('/api/debug/test-request', methods=['GET'])
-def debug_test_request():
+@app.route('/api/debug/test', methods=['GET'])
+def debug_test():
     """Тестовый запрос"""
     iin = request.args.get('iin', '931229400494')
-    endpoint = request.args.get('endpoint', '/api/v3/search/iin')
     
     try:
         result = pw_worker.submit_task("api_request", {
-            "endpoint": endpoint,
+            "endpoint": "/api/v3/search/iin",
             "params": {"iin": iin}
-        }, timeout=30)
+        }, timeout=20)
         
         return jsonify({
             "success": result.get("success", False),
@@ -937,71 +838,50 @@ def debug_test_request():
             "error": str(e)
         }), 500
 
-@app.route('/api/debug/re-login', methods=['POST'])
-def debug_re_login():
-    """Принудительный перелогин"""
-    auth_header = request.headers.get('Authorization')
-    if auth_header != f"Bearer {SECRET_TOKEN}":
-        return jsonify({"error": "Forbidden"}), 403
-    
-    try:
-        result = pw_worker.submit_task("re_login", {}, timeout=30)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-# ================== 7. ЗАПУСК ==================
+# ================== 8. ЗАПУСК ==================
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА")
+    print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА (ОПТИМИЗИРОВАННЫЙ)")
     print("=" * 60)
-    print("Архитектура: ВСЕ Playwright операции в одном потоке")
-    print("Логирование: включено (pena_api.log)")
+    print("Архитектура: Один поток Playwright, оптимизированная память")
+    print("Исправлено: EPIPE ошибки, перегрузка памяти")
+    print("Логи: pena_api.log")
     print("=" * 60)
     
     # Запускаем Playwright worker
     pw_worker.start()
     
     # Ждем инициализации
-    print("\n[MAIN] ⏳ Ожидаем инициализации Playwright worker...")
-    initialized = pw_worker.init_event.wait(timeout=45)
+    print("\n⏳ Ожидаем инициализации Playwright...")
+    initialized = pw_worker.init_event.wait(timeout=40)
     
     if initialized:
-        print("[MAIN] ✅ Playwright worker инициализирован!")
+        print("✅ Playwright инициализирован")
         
-        # Тестируем соединение
+        # Тестовый запрос
         try:
             test_result = pw_worker.submit_task("test_connection", {}, timeout=15)
-            if test_result.get("success"):
-                data = test_result.get("data", {})
-                if data.get("test_passed"):
-                    print("[MAIN] ✅ Тестовый запрос успешен!")
-                    print(f"[MAIN] 📊 Статус: {data.get('response_status')}")
-                    print(f"[MAIN] 📏 Длина ответа: {data.get('response_length')}")
-                else:
-                    print(f"[MAIN] ⚠️ Тестовый запрос не прошел: {data}")
+            if test_result.get("success") and test_result.get("data", {}).get("test_passed"):
+                print("✅ Тестовый запрос успешен")
             else:
-                print(f"[MAIN] ⚠️ Ошибка тестового запроса: {test_result.get('error')}")
+                print(f"⚠️ Тестовый запрос не прошел: {test_result}")
         except Exception as e:
-            print(f"[MAIN] ⚠️ Ошибка тестового запроса: {e}")
+            print(f"⚠️ Ошибка тестового запроса: {e}")
     else:
-        print("[MAIN] ⚠️ Таймаут инициализации Playwright worker!")
+        print("❌ Таймаут инициализации Playwright!")
     
-    print("\n🌐 Flask сервер запускается на порту 5000...")
-    print("📋 Проверка здоровья: GET http://localhost:5000/api/health")
-    print("🔍 Поиск: POST http://localhost:5000/api/search")
-    print("🐛 Отладка: GET http://localhost:5000/api/debug/test-request?iin=931229400494")
-    print("📁 Логи: pena_api.log")
+    print("\n🌐 Flask сервер запускается...")
+    print("📡 Health check: GET /api/health")
+    print("🔍 Поиск: POST /api/search")
     print("=" * 60)
     
     # Запускаем Flask
-    app.run(
-        host='0.0.0.0', 
-        port=5000, 
+    from werkzeug.serving import run_simple
+    run_simple(
+        '0.0.0.0', 
+        5000, 
+        app, 
         threaded=True, 
         use_reloader=False,
-        debug=False
+        processes=1
     )
