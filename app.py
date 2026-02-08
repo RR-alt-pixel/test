@@ -744,43 +744,21 @@ def start_session():
 
 @app.before_request
 def validate_session():
-    # ВРЕМЕННО ОТКЛЮЧАЕМ ПРОВЕРКУ
+    # ВРЕМЕННО ОТКЛЮЧЕНО ДЛЯ ТЕСТОВ - ВСЯ ПРОВЕРКА ВЫКЛЮЧЕНА
+    # Вставь этот код вместо старой функции validate_session()
     pass
-    if request.path == "/api/search" and request.method == "POST":
-        data = request.json or {}
-        uid = data.get("telegram_user_id")
-        token = data.get("session_token")
-        
-        if not uid or not token:
-            return jsonify({"error": "Не указаны учетные данные"}), 403
-        
-        try:
-            uid_int = int(uid)
-            session = active_sessions.get(uid_int)
-            if not session:
-                return jsonify({"error": "Сессия не найдена."}), 403
-            if session["token"] != token:
-                return jsonify({"error": "Сессия недействительна."}), 403
-            if time.time() - session["created"] > SESSION_TTL:
-                del active_sessions[uid_int]
-                return jsonify({"error": "Сессия истекла."}), 403
-        except ValueError:
-            return jsonify({"error": "Неверный Telegram ID"}), 400
 
 @app.route('/api/search', methods=['POST'])
 def api_search():
+    # ВРЕМЕННО ОТКЛЮЧАЕМ ПРОВЕРКУ АВТОРИЗАЦИИ
     data = request.json
-    user_id = data.get('telegram_user_id')
-    
-    if not user_id:
-        return jsonify({"error": "Ошибка авторизации."}), 403
-    
     query = data.get('query', '').strip()
+    
     if not query:
         return jsonify({"error": "Пустой запрос"}), 400
     
     print(f"\n" + "=" * 60)
-    print(f"[SEARCH] 🔍 Пользователь {user_id} ищет: {query}")
+    print(f"[SEARCH] 🔍 Тестовый поиск (защита отключена): {query}")
     print("=" * 60)
     
     try:
@@ -881,10 +859,11 @@ def debug_init_sessions():
 
 # ================== 9. ЗАПУСК СЕРВЕРА ==================
 print("\n" + "=" * 60)
-print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА (ИСПРАВЛЕННАЯ ВЕРСИЯ)")
+print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА (ЗАЩИТА ОТКЛЮЧЕНА ДЛЯ ТЕСТОВ)")
 print("=" * 60)
 print("Режим: синхронные запросы с thread-local сессиями")
 print("Исправлена ошибка: UnboundLocalError и cannot switch thread")
+print("⚠️ ЗАЩИТА ОТКЛЮЧЕНА - ДЛЯ ТЕСТИРОВАНИЯ ⚠️")
 print("=" * 60)
 
 # Загружаем разрешенных пользователей
@@ -897,7 +876,7 @@ init_success = init_token_pool()
 if not init_success:
     print("\n⚠️ ВНИМАНИЕ: Не удалось создать сессии!")
 else:
-    print("\n✅ СЕРВЕР ГОТОВ К РАБОТЕ!")
+    print("\n✅ СЕРВЕР ГОТОВ К РАБОТЕ (ЗАЩИТА ОТКЛЮЧЕНА)!")
 
 def cleanup_sessions():
     while True:
@@ -913,7 +892,8 @@ Thread(target=cleanup_sessions, daemon=True).start()
 if __name__ == "__main__":
     print(f"\n🌐 Сервер запущен!")
     print(f"📋 Проверка: curl https://api.reft.site/api/health")
-    print("\n✅ Готов к работе с Telegram мини-приложением!")
+    print("⚠️ ЗАЩИТА ОТКЛЮЧЕНА - тестируй запросы напрямую")
+    print("\n✅ Готов к работе!")
     
     # Запускаем Flask в режиме без перезагрузки
     from werkzeug.serving import run_simple
