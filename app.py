@@ -3,10 +3,8 @@ import os
 import time
 import json
 import random
-import traceback
-import hashlib
-from threading import Thread, Lock
-from typing import Optional, Dict, List, Any
+import threading
+from typing import List, Dict, Any
 from urllib.parse import urlencode, urljoin
 
 import requests
@@ -15,7 +13,6 @@ from flask_cors import CORS
 from playwright.sync_api import sync_playwright
 
 # ================== 1. НАСТРОЙКИ ==================
-BOT_TOKEN = "8545598161:AAGM6HtppAjUOuSAYH0mX5oNcPU0SuO59N4"
 ALLOWED_USERS_URL = "https://raw.githubusercontent.com/RR-alt-pixel/test/refs/heads/main/allowed_ids.json"
 ALLOWED_USER_IDS: List[int] = [0]
 
@@ -27,38 +24,28 @@ LOGIN_SELECTOR = 'input[placeholder="Логин"]'
 PASSWORD_SELECTOR = 'input[placeholder="Пароль"]'
 SIGN_IN_BUTTON_SELECTOR = 'button[type="submit"]'
 
-# ================== 2. АККАУНТЫ ==================
-accounts = [
-    {"username": "klon9", "password": "7755SSaa"},
-]
-
-# ================== 3. SINGLE SESSION ==================
-class PenaSession:
-    """Одна сессия для всех запросов"""
-    def __init__(self):
-        self.playwright = None
-        self.browser = None
-        self.context = None
-        self.page = None
-        self.cookies = {}
-        self.headers = {}
-        self.fingerprint = None
-        self.is_initialized = False
-        self.lock = Lock()
-        
+# ================== 2. GLOBAL PLAYWRIGHT (один на все) ==================
+class GlobalPlaywright:
+    """Один Playwright на весь процесс"""
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+    
     def initialize(self):
-        """Инициализация сессии"""
-        with self.lock:
-            if self.is_initialized:
+        """Инициализация в основном потоке при старте"""
+        with self._lock:
+            if self._initialized:
                 return True
                 
-            print("🔄 Инициализация Playwright сессии...")
-            
+            print("🔄 Инициализация Playwright...")
             try:
-                # Запускаем Playwright
                 self.playwright = sync_playwright().start()
                 
-                # Запускаем браузер в легком режиме
                 self.browser = self.playwright.chromium.launch(
                     headless=True,
                     args=[
@@ -69,12 +56,10 @@ class PenaSession:
                         "--single-process",
                         "--no-zygote",
                         "--no-first-run",
-                        "--disable-extensions",
                         "--window-size=1280,720"
                     ]
                 )
                 
-                # Создаем контекст
                 self.context = self.browser.new_context(
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     viewport={"width": 1280, "height": 720},
@@ -83,92 +68,74 @@ class PenaSession:
                     ignore_https_errors=True,
                 )
                 
-                # Создаем страницу
                 self.page = self.context.new_page()
                 
-                # Anti-detection
                 self.page.add_init_script("""
                     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                     window.chrome = {runtime: {}};
                 """)
                 
                 # Логинимся
-                print("🔐 Логинимся в pena.rest...")
+                print("🔐 Логинимся...")
                 self.page.goto(LOGIN_PAGE, wait_until="domcontentloaded", timeout=30000)
                 time.sleep(2)
                 
-                # Заполняем логин/пароль
-                self.page.fill(LOGIN_SELECTOR, accounts[0]["username"])
+                self.page.fill(LOGIN_SELECTOR, "klon9")
                 time.sleep(0.5)
-                self.page.fill(PASSWORD_SELECTOR, accounts[0]["password"])
+                self.page.fill(PASSWORD_SELECTOR, "7755SSaa")
                 time.sleep(0.5)
-                
-                # Нажимаем кнопку
                 self.page.click(SIGN_IN_BUTTON_SELECTOR)
                 time.sleep(3)
                 
-                # Переходим на dashboard
-                self.page.goto(f"{BASE_URL}/dashboard", wait_until="domcontentloaded", timeout=20000)
-                time.sleep(2)
+                # Проверяем успешность
+                if "dashboard" not in self.page.url:
+                    print("⚠️ Переход на dashboard...")
+                    self.page.goto(f"{BASE_URL}/dashboard", wait_until="domcontentloaded", timeout=10000)
+                    time.sleep(2)
                 
-                # Получаем куки
-                cookies_list = self.context.cookies()
-                self.cookies = {c['name']: c['value'] for c in cookies_list}
-                
-                # Генерируем fingerprint
-                self.fingerprint = hashlib.sha256(f"{accounts[0]['username']}{int(time.time())}".encode()).hexdigest()
-                
-                # Создаем заголовки
-                self._create_headers()
-                
-                self.is_initialized = True
-                print("✅ Сессия инициализирована")
+                self._initialized = True
+                print("✅ Playwright инициализирован")
                 return True
                 
             except Exception as e:
                 print(f"❌ Ошибка инициализации: {e}")
+                import traceback
                 traceback.print_exc()
                 return False
     
-    def _create_headers(self):
-        """Создание заголовков"""
-        cookie_header = "; ".join([f"{k}={v}" for k, v in self.cookies.items()])
-        
-        self.headers = {
-            "accept": "application/json, text/plain, */*",
-            "accept-language": "ru-RU,ru;q=0.9",
-            "content-type": "application/json",
-            "referer": f"{BASE_URL}/dashboard/search",
-            "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-origin",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "x-device-fingerprint": self.fingerprint,
-            "cookie": cookie_header,
-            "x-requested-with": "XMLHttpRequest"
-        }
-    
     def make_request(self, endpoint: str, params: dict = None):
-        """Выполнение запроса"""
-        with self.lock:
+        """ВСЕ запросы в основном потоке - синхронно"""
+        with self._lock:  # Блокировка чтобы не было параллельных запросов
             try:
+                if not self._initialized:
+                    print("⚠️ Playwright не инициализирован")
+                    return {"error": "Not initialized", "success": False}
+                
                 # Формируем URL
                 url = urljoin(BASE_URL, endpoint)
                 if params:
                     query_string = urlencode(params, doseq=True)
-                    url = f"{url}?{query_string}" if "?" not in url else f"{url}&{query_string}"
+                    url = f"{url}?{query_string}"
                 
-                print(f"📡 Запрос: {url[:80]}...")
+                print(f"📡 Синхронный запрос: {url[:80]}...")
                 
-                # Отправляем запрос
-                response = self.context.request.get(
-                    url, 
-                    headers=self.headers, 
-                    timeout=20000
-                )
+                # Получаем актуальные куки перед запросом
+                cookies = self.context.cookies()
+                cookies_dict = {c['name']: c['value'] for c in cookies}
+                
+                # Формируем заголовки
+                headers = {
+                    "accept": "application/json, text/plain, */*",
+                    "content-type": "application/json",
+                    "referer": f"{BASE_URL}/dashboard/search",
+                    "cookie": "; ".join([f"{k}={v}" for k, v in cookies_dict.items()]),
+                    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "x-requested-with": "XMLHttpRequest",
+                    "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                }
+                
+                # Делаем запрос
+                response = self.context.request.get(url, headers=headers, timeout=15000)
                 
                 print(f"📊 Ответ: {response.status}")
                 
@@ -191,27 +158,16 @@ class PenaSession:
             except Exception as e:
                 print(f"❌ Ошибка запроса: {e}")
                 return {"error": str(e), "success": False}
-    
-    def close(self):
-        """Закрытие сессии"""
-        try:
-            if self.browser:
-                self.browser.close()
-            if self.playwright:
-                self.playwright.stop()
-            print("✅ Сессия закрыта")
-        except:
-            pass
 
-# Глобальная сессия
-pena_session = PenaSession()
+# Глобальный экземпляр
+pw = GlobalPlaywright()
 
-# ================== 4. ПОИСКОВЫЕ ФУНКЦИИ ==================
+# ================== 3. ПОИСКОВЫЕ ФУНКЦИИ ==================
 def search_by_iin(iin: str):
     """Поиск по ИИН"""
     print(f"🔍 Поиск по ИИН: {iin}")
     
-    result = pena_session.make_request("/api/v3/search/iin", params={"iin": iin})
+    result = pw.make_request("/api/v3/search/iin", params={"iin": iin})
     
     if not result["success"]:
         return f"❌ Ошибка: {result.get('error', 'Неизвестная ошибка')}"
@@ -231,14 +187,16 @@ def search_by_iin(iin: str):
         return "⚠️ Ничего не найдено по ИИН."
     
     results = []
-    for i, p in enumerate(data[:5], 1):
-        result_text = f"{i}. 🧾 <b>ИИН: {p.get('iin','')}</b>"
-        if p.get('snf'):
-            result_text += f"\n   👤 {p.get('snf','')}"
-        if p.get('phone_number'):
-            result_text += f"\n   📱 {p.get('phone_number','')}"
-        if p.get('birthday'):
-            result_text += f"\n   📅 {p.get('birthday','')}"
+    for i, item in enumerate(data[:5], 1):
+        result_text = f"{i}. 🧾 <b>ИИН: {item.get('iin','')}</b>"
+        if item.get('snf'):
+            result_text += f"\n   👤 {item.get('snf','')}"
+        if item.get('phone_number'):
+            result_text += f"\n   📱 {item.get('phone_number','')}"
+        if item.get('birthday'):
+            result_text += f"\n   📅 {item.get('birthday','')}"
+        if item.get('source'):
+            result_text += f"\n   📍 {item.get('source')}"
         results.append(result_text)
     
     return "\n\n".join(results)
@@ -251,7 +209,7 @@ def search_by_phone(phone: str):
     
     print(f"🔍 Поиск по телефону: {phone} -> {clean}")
     
-    result = pena_session.make_request("/api/v3/search/phone", params={"phone": clean, "limit": 10})
+    result = pw.make_request("/api/v3/search/phone", params={"phone": clean, "limit": 10})
     
     if not result["success"]:
         return f"❌ Ошибка: {result.get('error', 'Неизвестная ошибка')}"
@@ -271,12 +229,14 @@ def search_by_phone(phone: str):
         return f"⚠️ Ничего не найдено по номеру {phone}"
     
     results = []
-    for i, p in enumerate(data[:5], 1):
-        result_text = f"{i}. 📱 <b>Телефон: {p.get('phone_number','')}</b>"
-        if p.get('snf'):
-            result_text += f"\n   👤 {p.get('snf','')}"
-        if p.get('iin'):
-            result_text += f"\n   🧾 ИИН: {p.get('iin','')}"
+    for i, item in enumerate(data[:5], 1):
+        result_text = f"{i}. 📱 <b>Телефон: {item.get('phone_number','')}</b>"
+        if item.get('snf'):
+            result_text += f"\n   👤 {item.get('snf','')}"
+        if item.get('iin'):
+            result_text += f"\n   🧾 ИИН: {item.get('iin','')}"
+        if item.get('source'):
+            result_text += f"\n   📍 {item.get('source')}"
         results.append(result_text)
     
     return "\n\n".join(results)
@@ -301,7 +261,7 @@ def search_by_fio(text: str):
             params["father_name"] = parts[2]
         params.update({"smart_mode": "true", "limit": 10})
     
-    result = pena_session.make_request("/api/v3/search/fio", params=params)
+    result = pw.make_request("/api/v3/search/fio", params=params)
     
     if not result["success"]:
         return f"❌ Ошибка: {result.get('error', 'Неизвестная ошибка')}"
@@ -321,19 +281,21 @@ def search_by_fio(text: str):
         return "⚠️ Ничего не найдено."
     
     results = []
-    for i, p in enumerate(data[:10], 1):
-        result_text = f"{i}. 👤 <b>{p.get('snf','')}</b>"
-        if p.get('iin'):
-            result_text += f"\n   🧾 ИИН: {p.get('iin','')}"
-        if p.get('birthday'):
-            result_text += f"\n   📅 Дата рождения: {p.get('birthday','')}"
-        if p.get('phone_number'):
-            result_text += f"\n   📱 Телефон: {p.get('phone_number','')}"
+    for i, item in enumerate(data[:10], 1):
+        result_text = f"{i}. 👤 <b>{item.get('snf','')}</b>"
+        if item.get('iin'):
+            result_text += f"\n   🧾 ИИН: {item.get('iin','')}"
+        if item.get('birthday'):
+            result_text += f"\n   📅 Дата рождения: {item.get('birthday','')}"
+        if item.get('phone_number'):
+            result_text += f"\n   📱 Телефон: {item.get('phone_number','')}"
+        if item.get('source'):
+            result_text += f"\n   📍 {item.get('source')}"
         results.append(result_text)
     
     return "📌 Результаты поиска по ФИО:\n\n" + "\n".join(results)
 
-# ================== 5. FLASK APP ==================
+# ================== 4. FLASK APP ==================
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
@@ -372,7 +334,6 @@ def start_session():
         
         now = time.time()
         
-        # Создаем сессию
         session_token = f"{user_id_int}-{int(now)}-{random.randint(1000,9999)}"
         active_sessions[user_id_int] = {"token": session_token, "created": now}
         
@@ -386,7 +347,7 @@ def start_session():
 @app.route('/api/search', methods=['POST'])
 def api_search():
     """Основной поисковый эндпоинт"""
-    # ВРЕМЕННО ОТКЛЮЧАЕМ ПРОВЕРКУ АВТОРИЗАЦИИ ДЛЯ ТЕСТОВ
+    # ВРЕМЕННО ОТКЛЮЧАЕМ ПРОВЕРКУ
     data = request.json or {}
     query = data.get('query', '').strip()
     
@@ -412,56 +373,49 @@ def api_search():
         
     except Exception as e:
         print(f"❌ Ошибка поиска: {e}")
+        import traceback
         traceback.print_exc()
         return jsonify({"error": "Внутренняя ошибка сервера"}), 500
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Проверка здоровья сервиса"""
-    return jsonify({
-        "status": "ok" if pena_session.is_initialized else "error",
-        "session_initialized": pena_session.is_initialized,
-        "active_flask_sessions": len(active_sessions),
-        "allowed_users": len(ALLOWED_USER_IDS)
-    })
-
-@app.route('/api/debug/init', methods=['POST'])
-def debug_init():
-    """Принудительная инициализация"""
-    auth_header = request.headers.get('Authorization')
-    if auth_header != f"Bearer {SECRET_TOKEN}":
-        return jsonify({"error": "Forbidden"}), 403
+    test_result = pw.make_request("/api/v3/search/iin", params={"iin": "931229400494"})
     
-    success = pena_session.initialize()
-    return jsonify({"success": success})
+    return jsonify({
+        "status": "ok" if test_result["success"] else "error",
+        "test_passed": test_result["success"],
+        "playwright_initialized": pw._initialized,
+        "active_sessions": len(active_sessions)
+    })
 
 @app.route('/api/debug/test', methods=['GET'])
 def debug_test():
     """Тестовый запрос"""
     iin = request.args.get('iin', '931229400494')
-    result = pena_session.make_request("/api/v3/search/iin", params={"iin": iin})
+    result = pw.make_request("/api/v3/search/iin", params={"iin": iin})
     return jsonify(result)
 
-# ================== 6. ЗАПУСК ==================
+# ================== 5. ЗАПУСК ==================
 print("\n" + "=" * 60)
 print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА")
 print("=" * 60)
-print("Архитектура: Одна сессия, без очередей")
-print("Решена проблема: cannot switch to a different thread")
-print("⚠️ ЗАЩИТА ОТКЛЮЧЕНА ДЛЯ ТЕСТОВ")
+print("Архитектура: Один Playwright, все запросы синхронно")
+print("Решено: Нет ошибки 'cannot switch to a different thread'")
+print("Запросы: Синхронные, с блокировкой")
 print("=" * 60)
 
-# Загружаем разрешенных пользователей
-load_allowed_users()
-
-# Инициализируем сессию
-print("\n🔄 Инициализация сессии...")
-init_success = pena_session.initialize()
+# Инициализируем Playwright в основном потоке
+print("\n🔄 Инициализация Playwright...")
+init_success = pw.initialize()
 
 if init_success:
     print("✅ СЕРВЕР ГОТОВ К РАБОТЕ!")
 else:
-    print("❌ Не удалось инициализировать сессию")
+    print("❌ Не удалось инициализировать Playwright")
+
+# Загружаем разрешенных пользователей
+load_allowed_users()
 
 print(f"\n🌐 Сервер запускается...")
 print("🔍 Поиск: POST /api/search")
@@ -469,11 +423,13 @@ print("📋 Проверка: GET /api/health")
 print("=" * 60)
 
 if __name__ == "__main__":
-    # Запускаем Flask
-    app.run(
-        host='0.0.0.0', 
-        port=5000, 
-        threaded=True, 
-        use_reloader=False,
-        debug=False
+    # Запускаем Flask в одном потоке!
+    from werkzeug.serving import run_simple
+    run_simple(
+        '0.0.0.0', 
+        5000, 
+        app, 
+        threaded=False,  # ВАЖНО: НЕ threaded!
+        processes=1,
+        use_reloader=False
     )
