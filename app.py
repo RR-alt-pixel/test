@@ -744,6 +744,8 @@ def start_session():
 
 @app.before_request
 def validate_session():
+    # ВРЕМЕННО ОТКЛЮЧАЕМ ПРОВЕРКУ
+    pass
     if request.path == "/api/search" and request.method == "POST":
         data = request.json or {}
         uid = data.get("telegram_user_id")
