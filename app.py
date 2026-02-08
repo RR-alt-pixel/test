@@ -9,14 +9,13 @@ import hashlib
 import threading
 from threading import Thread, Lock, Event, local
 from typing import Optional, Dict, List, Any
-from queue import Queue
 from urllib.parse import urlencode, urljoin
 from datetime import datetime
 
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from playwright.sync_api import sync_playwright, Page
+from playwright.sync_api import sync_playwright
 
 # ================== 1. НАСТРОЙКИ ==================
 BOT_TOKEN = "8545598161:AAGM6HtppAjUOuSAYH0mX5oNcPU0SuO59N4"
@@ -234,6 +233,37 @@ class PWManager:
                     "--use-gl=egl",
                     "--disable-web-security",
                     "--disable-features=IsolateOrigins,site-per-process",
+                    "--disable-site-isolation-trials",
+                    "--disable-background-networking",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-breakpad",
+                    "--disable-client-side-phishing-detection",
+                    "--disable-component-update",
+                    "--disable-default-apps",
+                    "--disable-domain-reliability",
+                    "--disable-extensions",
+                    "--disable-features=AudioServiceOutOfProcess",
+                    "--disable-hang-monitor",
+                    "--disable-ipc-flooding-protection",
+                    "--disable-notifications",
+                    "--disable-offer-store-unmasked-wallet-cards",
+                    "--disable-popup-blocking",
+                    "--disable-print-preview",
+                    "--disable-prompt-on-repost",
+                    "--disable-renderer-backgrounding",
+                    "--disable-speech-api",
+                    "--disable-sync",
+                    "--hide-scrollbars",
+                    "--ignore-gpu-blacklist",
+                    "--metrics-recording-only",
+                    "--mute-audio",
+                    "--no-default-browser-check",
+                    "--no-first-run",
+                    "--no-pings",
+                    "--no-zygote",
+                    "--password-store=basic",
+                    "--use-mock-keychain",
                     "--window-size=1920,1080"
                 ],
                 timeout=60000
@@ -423,13 +453,11 @@ class PWManager:
             print(f"[REQUEST] 📡 Запрос к: {url}")
             print(f"[REQUEST] 📋 Используем fingerprint: {session_data.get('fingerprint', '')[:30]}...")
             
-            # КРИТИЧЕСКИ ВАЖНО: контекст используется в том же потоке, где создан
             response = session_data["context"].request.get(url, headers=headers, timeout=30000)
             
             session_data["last_used"] = int(time.time())
             
             print(f"[REQUEST] 📊 Статус ответа: {response.status}")
-            print(f"[REQUEST] 📄 Длина ответа: {len(response.text())} символов")
             
             result = {
                 "status": response.status,
@@ -451,7 +479,6 @@ class PWManager:
             
         except Exception as e:
             print(f"[REQUEST] ❌ Ошибка запроса: {e}")
-            traceback.print_exc()
             return {"error": str(e), "success": False}
 
 pw_manager = PWManager()
@@ -501,6 +528,8 @@ def init_token_pool():
 
 def get_thread_session() -> Optional[Dict]:
     """Получаем сессию для текущего потока из thread-local хранилища"""
+    global pw_cycle  # ВАЖНО: объявляем как глобальную переменную
+    
     if not hasattr(thread_local, 'session'):
         print(f"[THREAD] Создаем новую сессию для потока {threading.current_thread().name}")
         
@@ -509,15 +538,13 @@ def get_thread_session() -> Optional[Dict]:
             if not pw_sessions:
                 init_token_pool()
             if pw_sessions:
-                # КАЖДЫЙ ПОТОК ПОЛУЧАЕТ СВОЮ КОПИЮ СЕССИИ ИЗ ПЕРВОЙ В ПУЛЕ
-                # Это важно для избежания конфликта потоков
-                if pw_cycle is None:
-                    pw_cycle = itertools.cycle(pw_sessions)
-                thread_local.session = next(pw_cycle)
+                # Берем первую сессию из пула для этого потока
+                thread_local.session = pw_sessions[0]
+                print(f"[THREAD] ✅ Сессия назначена для потока")
     
     return getattr(thread_local, 'session', None)
 
-# ================== 6. CRM GET (СИНХРОННАЯ ВЕРСИЯ) ==================
+# ================== 6. CRM GET ==================
 def crm_get(endpoint: str, params: dict = None):
     """Основная функция для API запросов - синхронная"""
     session = get_thread_session()
@@ -544,7 +571,7 @@ def crm_get(endpoint: str, params: dict = None):
             json_data=None
         )
 
-# ================== 7. ПОИСКОВЫЕ ФУНКЦИИ (СИНХРОННЫЕ) ==================
+# ================== 7. ПОИСКОВЫЕ ФУНКЦИИ ==================
 def search_by_iin(iin: str):
     print(f"[SEARCH IIN] 🔍 Поиск по ИИН: {iin}")
     
@@ -754,17 +781,23 @@ def api_search():
     print(f"[SEARCH] 🔍 Пользователь {user_id} ищет: {query}")
     print("=" * 60)
     
-    if query.isdigit() and len(query) == 12:
-        reply = search_by_iin(query)
-    elif query.startswith(("+", "8", "7")):
-        reply = search_by_phone(query)
-    else:
-        reply = search_by_fio(query)
-    
-    print(f"[SEARCH] ✅ Ответ готов, длина: {len(reply)} символов")
-    print("=" * 60)
-    
-    return jsonify({"result": reply})
+    try:
+        if query.isdigit() and len(query) == 12:
+            reply = search_by_iin(query)
+        elif query.startswith(("+", "8", "7")):
+            reply = search_by_phone(query)
+        else:
+            reply = search_by_fio(query)
+        
+        print(f"[SEARCH] ✅ Ответ готов, длина: {len(reply)} символов")
+        print("=" * 60)
+        
+        return jsonify({"result": reply})
+        
+    except Exception as e:
+        print(f"[SEARCH] ❌ Ошибка: {e}")
+        traceback.print_exc()
+        return jsonify({"error": "Внутренняя ошибка сервера"}), 500
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -823,11 +856,33 @@ def debug_sessions():
         "active_flask_sessions": len(active_sessions)
     })
 
+@app.route('/api/debug/init-sessions', methods=['POST'])
+def debug_init_sessions():
+    auth_header = request.headers.get('Authorization')
+    if auth_header != f"Bearer {SECRET_TOKEN}":
+        return jsonify({"error": "Forbidden"}), 403
+    
+    try:
+        success = init_token_pool()
+        with PW_SESSIONS_LOCK:
+            session_count = len(pw_sessions)
+        
+        return jsonify({
+            "success": success,
+            "sessions": session_count
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
 # ================== 9. ЗАПУСК СЕРВЕРА ==================
 print("\n" + "=" * 60)
 print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА (ИСПРАВЛЕННАЯ ВЕРСИЯ)")
 print("=" * 60)
-print("⚠️ Режим: синхронные запросы с thread-local сессиями")
+print("Режим: синхронные запросы с thread-local сессиями")
+print("Исправлена ошибка: UnboundLocalError и cannot switch thread")
 print("=" * 60)
 
 # Загружаем разрешенных пользователей
