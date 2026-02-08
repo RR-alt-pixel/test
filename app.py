@@ -9,7 +9,7 @@ import hashlib
 from threading import Thread, Lock, Event
 from typing import Optional, Dict, List, Any
 from queue import Queue
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urljoin
 
 import requests
 from flask import Flask, request, jsonify
@@ -38,7 +38,7 @@ accounts = [
     {"username": "klon9", "password": "7755SSaa"},
 ]
 
-# ================== 3. ПУЛ ==================
+# ================== 3. ПУЛ СЕССИЙ ==================
 pw_sessions: List[Dict[str, Any]] = []
 pw_cycle = None
 PW_SESSIONS_LOCK = Lock()
@@ -54,69 +54,36 @@ class ResponseLike:
             raise ValueError("No JSON")
         return self._json_data
 
-# ================== 4. PLAYWRIGHT ==================
+# ================== 4. PLAYWRIGHT MANAGER ==================
 class PWManager:
     def __init__(self):
-        self.q: Queue = Queue()
-        self.thread = Thread(target=self._run, daemon=True)
+        self.sessions = {}
+        self._pw = None
         self.ready = Event()
         self.started = False
-        self._pw = None
-
-    def start(self):
-        if not self.started:
-            self.started = True
-            self.thread.start()
-
-    def _rpc(self, cmd: str, payload: dict = None, timeout: int = 90) -> dict:
-        if payload is None:
-            payload = {}
-        box = {"done": Event(), "resp": None}
-        self.q.put((cmd, payload, box))
-        ok = box["done"].wait(timeout)
-        if not ok:
-            return {"ok": False, "error": "timeout"}
-        return box["resp"] or {"ok": False, "error": "no_response"}
-
-    def _run(self):
-        try:
-            self._pw = sync_playwright().start()
-            self.ready.set()
-            print("[PW] ✅ Playwright thread started")
-        except Exception as e:
-            print(f"[PW] ❌ failed to start: {e}")
-            traceback.print_exc()
-            self.ready.set()
-            return
-
-        while True:
-            cmd, payload, box = self.q.get()
-            try:
-                if cmd == "login_with_fp":
-                    resp = self._cmd_login_with_fp(payload)
-                elif cmd == "make_api_request":
-                    resp = self._cmd_make_api_request(payload)
-                elif cmd == "close_session":
-                    resp = self._cmd_close_session(payload)
-                else:
-                    resp = {"ok": False, "error": f"unknown_cmd:{cmd}"}
-            except Exception as e:
-                resp = {"ok": False, "error": str(e), "trace": traceback.format_exc()}
-            finally:
-                box["resp"] = resp
-                box["done"].set()
-                self.q.task_done()
-
-    def _cmd_login_with_fp(self, payload: dict) -> dict:
-        """Логинимся и получаем fingerprint из кук/ответа сервера"""
-        username = payload.get("username")
-        password = payload.get("password")
         
+    def start(self):
+        """Запускаем Playwright"""
+        if not self.started:
+            try:
+                self._pw = sync_playwright().start()
+                self.started = True
+                self.ready.set()
+                print("[PW] ✅ Playwright запущен")
+            except Exception as e:
+                print(f"[PW] ❌ Ошибка запуска: {e}")
+                self.ready.set()
+    
+    def create_session(self, username: str, password: str) -> Optional[Dict]:
+        """Создаем новую сессию с извлечением fingerprint"""
         if not self._pw:
-            return {"ok": False, "error": "playwright_not_ready"}
-
+            return None
+        
+        print(f"[SESSION] Создаем сессию для {username}")
+        
         browser = None
         try:
+            # Запускаем браузер с теми же настройками что и в тестовом скрипте
             browser = self._pw.chromium.launch(
                 headless=True,
                 args=[
@@ -130,327 +97,229 @@ class PWManager:
             )
             
             context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
                 viewport={"width": 1920, "height": 1080},
                 locale="ru-RU",
                 timezone_id="Europe/Moscow",
                 ignore_https_errors=True,
             )
             
-            page: Page = context.new_page()
+            page = context.new_page()
             
+            # Маскируем Playwright
             page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                 window.chrome = {runtime: {}};
             """)
-
-            print(f"[PLW-FP] Переход на {LOGIN_PAGE}")
             
-            page.goto(LOGIN_PAGE, wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(2000)
+            # Переменная для хранения fingerprint
+            fingerprint = None
+            
+            # Функция для перехвата fingerprint
+            def capture_fingerprint(request):
+                nonlocal fingerprint
+                if 'x-device-fingerprint' in request.headers:
+                    fp = request.headers['x-device-fingerprint']
+                    if fp and len(fp) == 64:
+                        fingerprint = fp
+                        print(f"[SESSION] Найден fingerprint: {fp[:30]}...")
+            
+            page.on("request", capture_fingerprint)
+            
+            # 1. Логинимся
+            print(f"[SESSION] Логин {username}...")
+            page.goto(LOGIN_PAGE, wait_until="networkidle")
+            time.sleep(1)
             
             page.fill(LOGIN_SELECTOR, username)
-            page.wait_for_timeout(500)
             page.fill(PASSWORD_SELECTOR, password)
-            page.wait_for_timeout(500)
-            
             page.click(SIGN_IN_BUTTON_SELECTOR)
             
+            # Ждем dashboard
             try:
                 page.wait_for_url("**/dashboard**", timeout=10000)
-                print(f"[PLW-FP] ✅ Успешный вход")
+                print(f"[SESSION] ✅ Успешный вход для {username}")
             except:
                 current_url = page.url
-                print(f"[PLW-FP] Текущий URL: {current_url}")
+                print(f"[SESSION] Текущий URL: {current_url}")
                 if "dashboard" not in current_url:
                     raise Exception("Не удалось войти в dashboard")
             
-            page.wait_for_timeout(3000)
+            time.sleep(2)
             
-            # Пробуем сделать запрос к API чтобы увидеть fingerprint в заголовках
-            fingerprint = None
-            try:
-                # Делаем тестовый запрос
-                test_result = page.evaluate("""
-                    async () => {
-                        const response = await fetch('/api/v3/user/profile', {
-                            method: 'GET',
-                            credentials: 'include'
-                        });
-                        return response.status;
-                    }
-                """)
-                print(f"[PLW-FP] Тестовый запрос статус: {test_result}")
-            except:
-                pass
+            # 2. Переходим на страницу поиска
+            search_url = urljoin(BASE_URL, "/dashboard/search")
+            page.goto(search_url, wait_until="networkidle")
+            time.sleep(3)
             
-            # Ищем fingerprint в localStorage или sessionStorage
-            fingerprint = page.evaluate("""
-                () => {
-                    try {
-                        // Сначала в localStorage
-                        for (let i = 0; i < localStorage.length; i++) {
-                            const key = localStorage.key(i);
-                            if (key && (key.includes('fingerprint') || key.includes('device'))) {
-                                const value = localStorage.getItem(key);
-                                if (value && value.length >= 64) {
-                                    return value;
-                                }
-                            }
-                        }
-                        
-                        // Затем в sessionStorage
-                        for (let i = 0; i < sessionStorage.length; i++) {
-                            const key = sessionStorage.key(i);
-                            if (key && (key.includes('fingerprint') || key.includes('device'))) {
-                                const value = sessionStorage.getItem(key);
-                                if (value && value.length >= 64) {
-                                    return value;
-                                }
-                            }
-                        }
-                        
-                        // В window объекте
-                        if (window.deviceFingerprint && typeof window.deviceFingerprint === 'string' && window.deviceFingerprint.length >= 64) {
-                            return window.deviceFingerprint;
-                        }
-                        
-                        return null;
-                    } catch(e) {
-                        return null;
-                    }
-                }
-            """)
+            # 3. Получаем куки
+            cookies = context.cookies()
+            cookies_dict = {c['name']: c['value'] for c in cookies}
+            cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
             
+            # 4. Если fingerprint не нашелся в запросах, пробуем получить из JS
             if not fingerprint:
-                # Если не нашли, создаём на основе данных браузера + времени
+                print("[SESSION] Ищем fingerprint в JavaScript...")
+                try:
+                    js_result = page.evaluate("""
+                        () => {
+                            // Ищем в window
+                            const windowKeys = Object.keys(window);
+                            for (const key of windowKeys) {
+                                try {
+                                    const value = window[key];
+                                    if (typeof value === 'string' && value.length === 64 && /^[a-f0-9]{64}$/.test(value)) {
+                                        return value;
+                                    }
+                                } catch(e) {}
+                            }
+                            return null;
+                        }
+                    """)
+                    
+                    if js_result:
+                        fingerprint = js_result
+                        print(f"[SESSION] Найден fingerprint в JS: {fingerprint[:30]}...")
+                except:
+                    pass
+            
+            # 5. Если все еще нет, генерируем
+            if not fingerprint:
+                print("[SESSION] Генерируем fingerprint...")
                 browser_data = page.evaluate("""
                     () => {
                         return {
                             userAgent: navigator.userAgent,
                             platform: navigator.platform,
-                            languages: navigator.languages,
+                            languages: navigator.languages.join(','),
                             hardwareConcurrency: navigator.hardwareConcurrency,
-                            deviceMemory: navigator.deviceMemory,
-                            screen: {width: screen.width, height: screen.height, colorDepth: screen.colorDepth},
-                            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+                            timestamp: Date.now()
                         };
                     }
                 """)
                 
-                fp_data = f"{json.dumps(browser_data, sort_keys=True)}{int(time.time())}{username}"
-                fingerprint = hashlib.sha256(fp_data.encode()).hexdigest()
-                print(f"[PLW-FP] Создан fingerprint: {fingerprint[:20]}...")
-            else:
-                print(f"[PLW-FP] Найден fingerprint: {fingerprint[:20]}...")
+                data_str = json.dumps(browser_data, sort_keys=True) + username
+                fingerprint = hashlib.sha256(data_str.encode()).hexdigest()
+                print(f"[SESSION] Сгенерирован fingerprint: {fingerprint[:30]}...")
             
-            cookies = context.cookies()
-            cookie_parts = []
-            for cookie in cookies:
-                cookie_parts.append(f"{cookie['name']}={cookie['value']}")
+            # 6. Формируем заголовки как в рабочем тесте
+            headers = {
+                "accept": "application/json",
+                "content-type": "application/json",
+                "x-device-fingerprint": fingerprint,
+                "x-requested-with": "XMLHttpRequest",
+                "referer": search_url,
+                "cookie": cookie_header,
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+                "sec-ch-ua": '"Chromium";v="145", "Not:A-Brand";v="99"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "same-origin",
+            }
             
-            cookie_header = "; ".join(cookie_parts)
-            cookies_dict = {c['name']: c['value'] for c in cookies}
-            
-            print(f"[PLW-FP] Получено {len(cookies)} кук")
-            
+            # 7. Создаем объект сессии
             session_data = {
                 "username": username,
-                "device_fingerprint": fingerprint,
+                "fingerprint": fingerprint,
+                "cookies": cookies_dict,
                 "cookie_header": cookie_header,
-                "cookies_dict": cookies_dict,
-                "cookies": cookies,
-                "browser": browser,
+                "headers": headers,
                 "context": context,
+                "browser": browser,
                 "page": page,
-                "time": int(time.time()),
+                "created_at": int(time.time()),
+                "last_used": int(time.time()),
             }
             
-            # Тестируем запрос с полученным fingerprint - ИСПРАВЛЕНО
-            test_args = {
-                "fp": fingerprint,
-                "cookies": cookie_header
-            }
-            test_api = page.evaluate("""
-                async (args) => {
-                    try {
-                        const { fp, cookies } = args;
-                        const headers = {
-                            'accept': 'application/json',
-                            'content-type': 'application/json',
-                            'x-device-fingerprint': fp,
-                            'x-requested-with': 'XMLHttpRequest'
-                        };
-                        
-                        if (cookies) {
-                            headers['cookie'] = cookies;
-                        }
-                        
-                        const response = await fetch('/api/v3/search/fio?limit=1&surname=TEST', {
-                            method: 'GET',
-                            headers: headers,
-                            credentials: 'include'
-                        });
-                        
-                        return {status: response.status, text: await response.text()};
-                    } catch(e) {
-                        return {status: 0, text: e.message};
-                    }
-                }
-            """, test_args)
+            # 8. Тестируем сессию
+            print("[SESSION] Тестируем сессию...")
+            test_response = context.request.get(
+                urljoin(BASE_URL, "/api/v3/search/fio?limit=1&surname=TEST"),
+                headers=headers
+            )
             
-            print(f"[PLW-FP] Тест API: статус {test_api.get('status')}")
+            print(f"[SESSION] Тестовый запрос: статус {test_response.status}")
             
-            print(f"[PLW-FP] ✅ {username} авторизован")
-            return {"ok": True, "session_data": session_data}
-
-        except Exception as e:
-            print(f"[PLW-FP] ❌ Ошибка: {e}")
-            traceback.print_exc()
-            try:
-                if browser:
-                    browser.close()
-            except:
-                pass
-            return {"ok": False, "error": str(e)}
-
-    def _cmd_make_api_request(self, payload: dict) -> dict:
-        """Делаем API запрос"""
-        session_data = payload.get("session_data")
-        url = payload.get("url")
-        
-        if not session_data or not url:
-            return {"ok": False, "error": "missing_session_data_or_url"}
-        
-        page = session_data.get("page")
-        if not page:
-            return {"ok": False, "error": "page_not_available"}
-        
-        try:
-            result = page.evaluate("""
-                async (args) => {
-                    const { url, fingerprint, cookies } = args;
-                    
-                    const headers = {
-                        'accept': 'application/json',
-                        'accept-encoding': 'gzip, deflate, br, zstd',
-                        'accept-language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-                        'content-type': 'application/json',
-                        'priority': 'u=1, i',
-                        'referer': 'https://pena.rest/dashboard/search',
-                        'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
-                        'sec-ch-ua-mobile': '?0',
-                        'sec-ch-ua-platform': '"Windows"',
-                        'sec-fetch-dest': 'empty',
-                        'sec-fetch-mode': 'cors',
-                        'sec-fetch-site': 'same-origin',
-                        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
-                        'x-device-fingerprint': fingerprint,
-                        'x-requested-with': 'XMLHttpRequest'
-                    };
-                    
-                    if (cookies) {
-                        headers['cookie'] = cookies;
-                    }
-                    
-                    try {
-                        const response = await fetch(url, {
-                            method: 'GET',
-                            headers: headers,
-                            credentials: 'include',
-                            mode: 'cors',
-                            cache: 'no-cache'
-                        });
-                        
-                        const text = await response.text();
-                        
-                        let jsonData = null;
-                        try {
-                            jsonData = JSON.parse(text);
-                        } catch(e) {}
-                        
-                        return {
-                            ok: response.ok,
-                            status: response.status,
-                            text: text,
-                            json: jsonData
-                        };
-                        
-                    } catch (fetchError) {
-                        return {
-                            ok: false,
-                            status: 0,
-                            text: String(fetchError),
-                            json: null
-                        };
-                    }
-                }
-            """, {
-                "url": url,
-                "fingerprint": session_data.get("device_fingerprint", ""),
-                "cookies": session_data.get("cookie_header", "")
-            })
-            
-            return {"ok": True, "result": result}
-            
-        except Exception as e:
-            return {"ok": False, "error": str(e), "trace": traceback.format_exc()}
-
-    def _cmd_close_session(self, payload: dict) -> dict:
-        """Закрываем сессию"""
-        session_data = payload.get("session_data")
-        if not session_data:
-            return {"ok": False, "error": "no_session_data"}
-        
-        browser = session_data.get("browser")
-        if browser:
-            try:
+            if test_response.status == 200:
+                print(f"[SESSION] ✅ Сессия для {username} создана успешно")
+                return session_data
+            else:
+                print(f"[SESSION] ❌ Сессия нерабочая: {test_response.status}")
                 browser.close()
-                return {"ok": True, "message": "Session closed"}
-            except Exception as e:
-                return {"ok": False, "error": str(e)}
-        return {"ok": True, "message": "No browser to close"}
+                return None
+                
+        except Exception as e:
+            print(f"[SESSION] ❌ Ошибка создания сессии: {e}")
+            traceback.print_exc()
+            if browser:
+                try:
+                    browser.close()
+                except:
+                    pass
+            return None
+    
+    def make_request(self, session_data: Dict, endpoint: str, params: dict = None):
+        """Делаем API запрос с использованием сессии"""
+        try:
+            url = urljoin(BASE_URL, endpoint)
+            if params:
+                query_string = urlencode(params, doseq=True)
+                url = f"{url}?{query_string}" if "?" not in url else f"{url}&{query_string}"
+            
+            # Обновляем заголовки (особенно referer)
+            headers = session_data["headers"].copy()
+            headers["referer"] = urljoin(BASE_URL, "/dashboard/search")
+            
+            # Делаем запрос
+            response = session_data["context"].request.get(url, headers=headers, timeout=30000)
+            
+            # Обновляем время использования
+            session_data["last_used"] = int(time.time())
+            
+            return {
+                "status": response.status,
+                "text": response.text(),
+                "json": response.json() if response.status == 200 else None,
+                "success": response.status == 200
+            }
+            
+        except Exception as e:
+            print(f"[REQUEST] ❌ Ошибка запроса: {e}")
+            return {"error": str(e), "success": False}
 
 pw_manager = PWManager()
 pw_manager.start()
 pw_manager.ready.wait(30)
 
-# ================== 5. ПУЛ СЕССИЙ ==================
-def init_token_pool_playwright():
+# ================== 5. ПУЛ СЕССИЙ (ОБНОВЛЕННЫЙ) ==================
+def init_token_pool():
     global pw_sessions, pw_cycle
 
-    print("[POOL] 🔄 Инициализация сессий...")
+    print("[POOL] 🔄 Инициализация пула сессий...")
     
     new_sessions = []
     for acc in accounts:
-        print(f"[POOL] Логин аккаунта {acc['username']}...")
+        print(f"[POOL] Создаем сессию для {acc['username']}...")
         
-        resp = pw_manager._rpc("login_with_fp", {
-            "username": acc["username"],
-            "password": acc["password"]
-        }, timeout=180)
+        session_data = pw_manager.create_session(acc["username"], acc["password"])
         
-        if resp.get("ok"):
-            session_data = resp.get("session_data", {})
-            new_sessions.append({
-                "username": acc["username"],
-                "password": acc["password"],
-                "session_data": session_data,
-                "time": int(time.time())
-            })
-            print(f"[POOL] ✅ Аккаунт {acc['username']} успешно авторизован")
+        if session_data:
+            new_sessions.append(session_data)
+            print(f"[POOL] ✅ Сессия для {acc['username']} создана")
         else:
-            print(f"[POOL] ❌ Ошибка авторизации {acc['username']}: {resp.get('error')}")
+            print(f"[POOL] ❌ Не удалось создать сессию для {acc['username']}")
 
     with PW_SESSIONS_LOCK:
         pw_sessions = new_sessions
         pw_cycle = itertools.cycle(pw_sessions) if pw_sessions else None
 
     if pw_sessions:
-        print(f"[POOL] ✅ init ok, sessions={len(pw_sessions)}")
+        print(f"[POOL] ✅ Пул инициализирован, сессий: {len(pw_sessions)}")
         for s in pw_sessions:
-            fp = s.get("session_data", {}).get("device_fingerprint", "")[:20]
-            cookies_count = len(s.get("session_data", {}).get("cookies", []))
+            fp = s.get("fingerprint", "")[:20]
+            cookies_count = len(s.get("cookies", {}))
             print(f"[POOL]   - {s['username']}: FP={fp}..., Cookies={cookies_count}")
     else:
         print("[POOL] ❌ Пустой пул сессий.")
@@ -459,7 +328,7 @@ def get_next_session() -> Optional[Dict]:
     global pw_sessions, pw_cycle
 
     if not pw_sessions:
-        init_token_pool_playwright()
+        init_token_pool()
         with PW_SESSIONS_LOCK:
             if not pw_sessions:
                 return None
@@ -469,7 +338,7 @@ def get_next_session() -> Optional[Dict]:
             pw_cycle = itertools.cycle(pw_sessions)
         try:
             s = next(pw_cycle)
-            fp = s.get("session_data", {}).get("device_fingerprint", "")[:20]
+            fp = s.get("fingerprint", "")[:20]
             print(f"[POOL] 🔁 Используется сессия {s['username']} (FP: {fp}...)")
             return s
         except StopIteration:
@@ -477,156 +346,93 @@ def get_next_session() -> Optional[Dict]:
             s = next(pw_cycle)
             return s
 
-def refresh_token_for_username(username: str) -> Optional[Dict]:
+def refresh_session(username: str) -> Optional[Dict]:
+    """Обновляем сессию для пользователя"""
     global pw_sessions, pw_cycle
+    
     try:
-        print(f"[AUTH] 🔄 Обновление сессии для {username}...")
+        print(f"[REFRESH] 🔄 Обновление сессии для {username}...")
         
         acc = next((a for a in accounts if a["username"] == username), None)
         if not acc:
-            print(f"[AUTH] ❌ Аккаунт {username} не найден")
+            print(f"[REFRESH] ❌ Аккаунт не найден")
             return None
         
+        # Закрываем старую сессию
         with PW_SESSIONS_LOCK:
-            old_sess = next((s for s in pw_sessions if s.get("username") == username), None)
-            if old_sess and old_sess.get("session_data"):
-                pw_manager._rpc("close_session", {"session_data": old_sess.get("session_data")})
+            old_session = next((s for s in pw_sessions if s.get("username") == username), None)
+            if old_session and old_session.get("browser"):
+                try:
+                    old_session["browser"].close()
+                except:
+                    pass
         
-        resp = pw_manager._rpc("login_with_fp", {
-            "username": acc["username"],
-            "password": acc["password"]
-        }, timeout=120)
+        # Создаем новую
+        new_session = pw_manager.create_session(acc["username"], acc["password"])
         
-        if not resp.get("ok"):
-            print(f"[AUTH] ❌ refresh failed: {resp.get('error')}")
-            return None
-        
-        session_data = resp.get("session_data", {})
-        new_sess = {
-            "username": acc["username"],
-            "password": acc["password"],
-            "session_data": session_data,
-            "time": int(time.time())
-        }
-        
-        with PW_SESSIONS_LOCK:
-            pw_sessions = [s for s in pw_sessions if s.get("username") != username]
-            pw_sessions.append(new_sess)
-            pw_cycle = itertools.cycle(pw_sessions)
-        
-        print(f"[AUTH] ✅ {username} session refreshed.")
-        return new_sess
-
-    except Exception as e:
-        print(f"[AUTH ERROR] {e}")
-        traceback.print_exc()
-    return None
-
-# ================== 6. TOKENS FILE ==================
-def save_tokens_to_file():
-    try:
-        with TOKENS_LOCK:
-            tmp = TOKENS_FILE + ".tmp"
-            meta = []
+        if new_session:
             with PW_SESSIONS_LOCK:
-                for s in pw_sessions:
-                    session_data = s.get("session_data", {})
-                    meta.append({
-                        "username": s.get("username"),
-                        "device_fingerprint": session_data.get("device_fingerprint"),
-                        "cookie_header": session_data.get("cookie_header"),
-                        "time": s.get("time"),
-                    })
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, TOKENS_FILE)
-            print(f"[TOKENS] 💾 Сохранено {len(meta)} записей.")
-    except Exception as e:
-        print(f"[TOKENS ERROR] {e}")
-
-# ================== 7. BUILD URL ==================
-def _build_url(endpoint: str, params: dict = None) -> str:
-    if endpoint.startswith("http"):
-        url = endpoint
-    else:
-        url = API_BASE + endpoint
-
-    if params:
-        qs = urlencode(params, doseq=True)
-        if "?" in url:
-            url = url + "&" + qs
+                # Удаляем старую, добавляем новую
+                pw_sessions = [s for s in pw_sessions if s.get("username") != username]
+                pw_sessions.append(new_session)
+                pw_cycle = itertools.cycle(pw_sessions)
+            
+            print(f"[REFRESH] ✅ Сессия для {username} обновлена")
+            return new_session
         else:
-            url = url + "?" + qs
-    return url
+            print(f"[REFRESH] ❌ Не удалось обновить сессию")
+            return None
+            
+    except Exception as e:
+        print(f"[REFRESH ERROR] {e}")
+        return None
 
-# ================== 8. CRM GET ==================
+# ================== 6. CRM GET (ОБНОВЛЕННЫЙ) ==================
 def crm_get(endpoint: str, params: dict = None):
-    sess = get_next_session()
-    if not sess:
-        return "❌ Нет сессий Playwright."
-
-    url = _build_url(endpoint, params=params)
-    session_data = sess.get("session_data", {})
-    username = sess["username"]
-    device_fp = session_data.get("device_fingerprint", "")
+    """Основная функция для API запросов"""
+    session = get_next_session()
+    if not session:
+        return ResponseLike(500, "❌ Нет доступных сессий")
+    
+    username = session.get("username", "unknown")
+    fingerprint = session.get("fingerprint", "")[:20]
     
     print(f"[CRM] {username} -> {endpoint}")
-    print(f"[CRM] URL: {url}")
-    print(f"[CRM] Используем FP: {device_fp[:20] if device_fp else 'НЕТ'}...")
-
-    resp = pw_manager._rpc("make_api_request", {
-        "session_data": session_data,
-        "url": url
-    }, timeout=60)
+    print(f"[CRM] Fingerprint: {fingerprint}...")
     
-    if not resp.get("ok"):
-        error_msg = resp.get('error', 'unknown')
-        print(f"[AUTH] {username} → API error: {error_msg}")
-        
-        new_sess = refresh_token_for_username(username)
-        if not new_sess:
-            return f"❌ Ошибка CRM: {error_msg}"
-        
-        new_session_data = new_sess.get("session_data", {})
-        resp = pw_manager._rpc("make_api_request", {
-            "session_data": new_session_data,
-            "url": url
-        }, timeout=60)
-        
-        if not resp.get("ok"):
-            return f"❌ Ошибка CRM после обновления: {resp.get('error')}")
+    # Делаем запрос через менеджер
+    result = pw_manager.make_request(session, endpoint, params)
     
-    result = resp.get("result", {})
-    status = int(result.get("status", 0) or 0)
-    txt = result.get("text", "") or ""
-    jsn = result.get("json", None)
-    
-    print(f"[CRM] Ответ: {status} ({len(txt)} chars)")
-    
-    if status in (401, 403):
-        print(f"[CRM-DEBUG] Текст ошибки {status}: {txt[:500]}")
-        
-        if "fingerprint" in txt.lower():
-            print(f"[CRM-DEBUG] Ошибка fingerprint! Обновляем сессию...")
+    if result.get("success"):
+        return ResponseLike(
+            status_code=result["status"],
+            text=result["text"],
+            json_data=result["json"]
+        )
+    else:
+        # Если ошибка аутентификации, пробуем обновить сессию
+        if result.get("status") in [401, 403]:
+            print(f"[CRM] ❌ Ошибка аутентификации, обновляем сессию...")
+            new_session = refresh_session(username)
             
-            new_sess = refresh_token_for_username(username)
-            if new_sess:
-                new_session_data = new_sess.get("session_data", {})
-                resp = pw_manager._rpc("make_api_request", {
-                    "session_data": new_session_data,
-                    "url": url
-                }, timeout=60)
-                
-                if resp.get("ok"):
-                    result = resp.get("result", {})
-                    status = int(result.get("status", 0) or 0)
-                    txt = result.get("text", "") or ""
-                    jsn = result.get("json", None)
-                    print(f"[CRM] После обновления сессии: {status}")
-    
-    return ResponseLike(status_code=status, text=txt, json_data=jsn)
+            if new_session:
+                # Пробуем снова с новой сессией
+                result = pw_manager.make_request(new_session, endpoint, params)
+                if result.get("success"):
+                    return ResponseLike(
+                        status_code=result["status"],
+                        text=result["text"],
+                        json_data=result["json"]
+                    )
+        
+        # Возвращаем ошибку
+        return ResponseLike(
+            status_code=result.get("status", 500),
+            text=result.get("text", result.get("error", "Unknown error")),
+            json_data=None
+        )
 
-# ================== 9. ОЧЕРЕДЬ CRM ==================
+# ================== 7. ОЧЕРЕДЬ И FLASK (ОСТАВЛЯЕМ БЕЗ ИЗМЕНЕНИЙ) ==================
 crm_queue = Queue()
 RESULT_TIMEOUT = 60
 
@@ -656,31 +462,7 @@ def enqueue_crm_get(endpoint, params=None):
         return {"status": "error", "error": result_box["error"]}
     return {"status": "ok", "result": result_box["result"]}
 
-# ================== 10. ALLOWED USERS ==================
-LAST_FETCH_TIME = 0
-FETCH_INTERVAL = 3600
-
-def fetch_allowed_users():
-    global ALLOWED_USER_IDS, LAST_FETCH_TIME
-    try:
-        r = requests.get(ALLOWED_USERS_URL, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            ids = [int(i) for i in data.get("allowed_users", [])]
-            if ids:
-                ALLOWED_USER_IDS = ids
-                LAST_FETCH_TIME = int(time.time())
-                print(f"[AUTH] ✅ {len(ALLOWED_USER_IDS)} пользователей разрешено.")
-    except Exception as e:
-        print(f"[AUTH ERROR] {e}")
-
-def periodic_fetch():
-    while True:
-        if int(time.time()) - LAST_FETCH_TIME >= FETCH_INTERVAL:
-            fetch_allowed_users()
-        time.sleep(FETCH_INTERVAL)
-
-# ================== 11. ПОИСК ==================
+# ================== 8. ПОИСКОВЫЕ ФУНКЦИИ ==================
 def search_by_iin(iin: str):
     r = enqueue_crm_get("/api/v3/search/iin", params={"iin": iin})
     if r["status"] != "ok":
@@ -692,58 +474,72 @@ def search_by_iin(iin: str):
         return "⚠️ Ничего не найдено по ИИН."
     if resp.status_code != 200:
         error_text = resp.text
-        if "device fingerprint" in error_text.lower():
-            return f"❌ Ошибка аутентификации (fingerprint). Пожалуйста, попробуйте позже."
+        if "fingerprint" in error_text.lower() or "authentication" in error_text.lower():
+            return f"❌ Ошибка аутентификации. Попробуйте позже."
         return f"❌ Ошибка {resp.status_code}: {error_text[:100]}"
+    
     data = resp.json()
     if not isinstance(data, list) or not data:
         return "⚠️ Ничего не найдено по ИИН."
-    p = data[0]
-    return (
-        f"👤 <b>{p.get('snf','')}</b>\n"
-        f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
-        f"📅 Дата рождения: {p.get('birthday','')}\n"
-        f"🚻 Пол: {p.get('sex','')}\n"
-        f"📱 Телефон: {p.get('phone_number','')}\n"
-        f"🏠 Адрес: {p.get('address','')}"
-    )
+    
+    # Форматируем результат
+    results = []
+    for i, p in enumerate(data[:5], 1):
+        result = f"{i}. 🧾 <b>ИИН: {p.get('iin','')}</b>"
+        if p.get('snf'):
+            result += f"\n   👤 {p.get('snf','')}"
+        if p.get('phone_number'):
+            result += f"\n   📱 {p.get('phone_number','')}"
+        if p.get('birthday'):
+            result += f"\n   📅 {p.get('birthday','')}"
+        if p.get('address'):
+            result += f"\n   🏠 {p.get('address','')[:50]}..."
+        results.append(result)
+    
+    return "\n\n".join(results) if results else "⚠️ Данные найдены, но пустые."
 
 def search_by_phone(phone: str):
     clean = ''.join(filter(str.isdigit, phone))
     if clean.startswith("8"):
         clean = "7" + clean[1:]
-    r = enqueue_crm_get("/api/v3/search/phone", params={"phone": clean, "limit": 100})
+    
+    r = enqueue_crm_get("/api/v3/search/phone", params={"phone": clean, "limit": 10})
     if r["status"] != "ok":
         return "⌛ Ваш запрос в очереди."
     resp = r["result"]
+    
     if isinstance(resp, str):
         return resp
     if resp.status_code == 404:
         return f"⚠️ Ничего не найдено по номеру {phone}"
     if resp.status_code != 200:
-        error_text = resp.text
-        if "device fingerprint" in error_text.lower():
-            return f"❌ Ошибка аутентификации (fingerprint). Пожалуйста, попробуйте позже."
-        return f"❌ Ошибка {resp.status_code}: {error_text[:100]}"
+        return f"❌ Ошибка {resp.status_code}"
+    
     data = resp.json()
     if not isinstance(data, list) or not data:
         return f"⚠️ Ничего не найдено по номеру {phone}"
-    p = data[0]
-    return (
-        f"👤 <b>{p.get('snf','')}</b>\n"
-        f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
-        f"📅 Дата рождения: {p.get('birthday','')}\n"
-        f"🚻 Пол: {p.get('sex','')}\n"
-        f"📱 Телефон: {p.get('phone_number','')}</code>\n"
-        f"🏠 Адрес: {p.get('address','')}"
-    )
+    
+    # Форматируем результат
+    results = []
+    for i, p in enumerate(data[:5], 1):
+        result = f"{i}. 📱 <b>Телефон: {p.get('phone_number','')}</b>"
+        if p.get('snf'):
+            result += f"\n   👤 {p.get('snf','')}"
+        if p.get('iin'):
+            result += f"\n   🧾 ИИН: {p.get('iin','')}"
+        if p.get('birthday'):
+            result += f"\n   📅 {p.get('birthday','')}"
+        results.append(result)
+    
+    return "\n\n".join(results)
 
 def search_by_fio(text: str):
+    # Обработка ФИО (как в предыдущей версии)
     if text.startswith(",,"):
         parts = text[2:].strip().split()
         if len(parts) < 2:
             return "⚠️ Укажите имя и отчество после ',,'"
-        q = {"name": parts[0], "father_name": " ".join(parts[1:]), "smart_mode": "true", "limit": 100}
+        q = {"name": parts[0], "father_name": " ".join(parts[1:]), "smart_mode": "true", "limit": 10}
     else:
         parts = text.split(" ")
         params = {}
@@ -753,38 +549,41 @@ def search_by_fio(text: str):
             params["name"] = parts[1]
         if len(parts) >= 3 and parts[2] != "":
             params["father_name"] = parts[2]
-        q = {**params, "smart_mode": "true", "limit": 100}
+        q = {**params, "smart_mode": "true", "limit": 10}
+    
     r = enqueue_crm_get("/api/v3/search/fio", params=q)
     if r["status"] != "ok":
         return "⌛ Ваш запрос в очереди."
     resp = r["result"]
+    
     if isinstance(resp, str):
         return resp
     if resp.status_code == 404:
         return "⚠️ Ничего не найдено."
     if resp.status_code != 200:
-        error_text = resp.text
-        if "device fingerprint" in error_text.lower():
-            return f"❌ Ошибка аутентификации (fingerprint). Пожалуйста, попробуйте позже."
-        return f"❌ Ошибка {resp.status_code}: {error_text[:100]}"
+        return f"❌ Ошибка {resp.status_code}"
+    
     data = resp.json()
     if not isinstance(data, list) or not data:
         return "⚠️ Ничего не найдено."
+    
+    # Форматируем результат
     results = []
-    for i, p in enumerate(data[:10], start=1):
-        results.append(
-            f"{i}. 👤 <b>{p.get('snf','')}</b>\n"
-            f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
-            f"📅 Дата рождения: {p.get('birthday','')}\n"
-            f"🚻 Пол: {p.get('sex','')}\n"
-            f"🌍 Национальность: {p.get('nationality','')}"
-        )
+    for i, p in enumerate(data[:10], 1):
+        result = f"{i}. 👤 <b>{p.get('snf','')}</b>"
+        if p.get('iin'):
+            result += f"\n   🧾 ИИН: {p.get('iin','')}"
+        if p.get('birthday'):
+            result += f"\n   📅 Дата рождения: {p.get('birthday','')}"
+        if p.get('phone_number'):
+            result += f"\n   📱 Телефон: {p.get('phone_number','')}"
+        if p.get('nationality'):
+            result += f"\n   🌍 Национальность: {p.get('nationality','')}"
+        results.append(result)
+    
     return "📌 Результаты поиска по ФИО:\n\n" + "\n".join(results)
 
-def search_by_address(address: str):
-    return "⚠️ Поиск по адресу временно недоступен."
-
-# ================== 12. FLASK ==================
+# ================== 9. FLASK APP (МИНИМАЛЬНЫЕ ИЗМЕНЕНИЯ) ==================
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
@@ -833,17 +632,19 @@ def api_search():
         return jsonify({"error": "Ошибка авторизации."}), 403
     if int(user_id) not in ALLOWED_USER_IDS:
         return jsonify({"error": "Нет доступа."}), 403
+    
     query = data.get('query', '').strip()
     if not query:
         return jsonify({"error": "Пустой запрос"}), 400
+    
+    # Определяем тип запроса
     if query.isdigit() and len(query) == 12:
         reply = search_by_iin(query)
     elif query.startswith(("+", "8", "7")):
         reply = search_by_phone(query)
-    elif any(x in query.upper() for x in ["УЛ.", "ПР.", "ДОМ", "РЕСПУБЛИКА"]):
-        reply = search_by_address(query)
     else:
         reply = search_by_fio(query)
+    
     return jsonify({"result": reply})
 
 @app.route('/api/queue-size', methods=['GET'])
@@ -855,7 +656,18 @@ def refresh_users():
     auth_header = request.headers.get('Authorization')
     if auth_header != f"Bearer {SECRET_TOKEN}":
         return jsonify({"error": "Forbidden"}), 403
-    fetch_allowed_users()
+    
+    # Загружаем разрешенных пользователей
+    try:
+        r = requests.get(ALLOWED_USERS_URL, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            ALLOWED_USER_IDS.clear()
+            ALLOWED_USER_IDS.extend([int(i) for i in data.get("allowed_users", [])])
+            print(f"[AUTH] ✅ Обновлены разрешенные пользователи: {len(ALLOWED_USER_IDS)}")
+    except Exception as e:
+        print(f"[AUTH ERROR] {e}")
+    
     return jsonify({"ok": True, "count": len(ALLOWED_USER_IDS)})
 
 @app.route('/api/debug/sessions', methods=['GET'])
@@ -867,14 +679,14 @@ def debug_sessions():
     with PW_SESSIONS_LOCK:
         sessions_info = []
         for s in pw_sessions:
-            session_data = s.get("session_data", {})
             sessions_info.append({
                 "username": s.get("username"),
-                "device_fingerprint": session_data.get("device_fingerprint", "")[:20] + "...",
-                "cookie_header_length": len(session_data.get("cookie_header", "")),
-                "cookies_count": len(session_data.get("cookies", [])),
-                "time": s.get("time"),
-                "age_seconds": int(time.time()) - s.get("time", 0)
+                "fingerprint": s.get("fingerprint", "")[:20] + "...",
+                "cookies_count": len(s.get("cookies", {})),
+                "has_cf_clearance": "cf_clearance" in s.get("cookies", {}),
+                "created_at": s.get("created_at"),
+                "last_used": s.get("last_used"),
+                "age_seconds": int(time.time()) - s.get("created_at", 0)
             })
     
     return jsonify({
@@ -883,74 +695,42 @@ def debug_sessions():
         "queue_size": crm_queue.qsize()
     })
 
-@app.route('/api/debug/force-refresh', methods=['POST'])
-def debug_force_refresh():
+@app.route('/api/debug/test-search', methods=['POST'])
+def debug_test_search():
+    """Тестовый поиск для отладки"""
     auth_header = request.headers.get('Authorization')
     if auth_header != f"Bearer {SECRET_TOKEN}":
         return jsonify({"error": "Forbidden"}), 403
     
     data = request.json or {}
-    username = data.get('username')
+    query = data.get('query', '931229400494')
+    search_type = data.get('type', 'iin')
     
-    if username:
-        result = refresh_token_for_username(username)
-        if result:
-            return jsonify({"ok": True, "message": f"Сессия для {username} обновлена"})
-        else:
-            return jsonify({"ok": False, "error": f"Не удалось обновить сессию для {username}"})
+    if search_type == 'iin':
+        result = search_by_iin(query)
+    elif search_type == 'phone':
+        result = search_by_phone(query)
     else:
-        init_token_pool_playwright()
-        return jsonify({"ok": True, "message": "Весь пул сессий переинициализирован"})
+        result = search_by_fio(query)
+    
+    return jsonify({
+        "query": query,
+        "type": search_type,
+        "result": result
+    })
 
-@app.route('/api/debug/test-request', methods=['POST'])
-def debug_test_request():
-    auth_header = request.headers.get('Authorization')
-    if auth_header != f"Bearer {SECRET_TOKEN}":
-        return jsonify({"error": "Forbidden"}), 403
-    
-    data = request.json or {}
-    endpoint = data.get('endpoint', '/api/v3/search/fio')
-    params = data.get('params', {'surname': 'ТЕСТ', 'limit': 5})
-    
-    sess = get_next_session()
-    if not sess:
-        return jsonify({"error": "Нет сессий"})
-    
-    url = _build_url(endpoint, params)
-    session_data = sess.get("session_data", {})
-    
-    resp = pw_manager._rpc("make_api_request", {
-        "session_data": session_data,
-        "url": url
-    }, timeout=60)
-    
-    if resp.get("ok"):
-        result = resp.get("result", {})
-        return jsonify({
-            "status": result.get("status"),
-            "text_length": len(result.get("text", "")),
-            "text_preview": result.get("text", "")[:500],
-            "json": result.get("json"),
-        })
-    else:
-        return jsonify({"error": resp.get("error")})
+# ================== 10. ЗАПУСК ==================
+print("🚀 Запуск обновленного API сервера...")
+print("=" * 60)
+print("Исправления:")
+print("1. Правильное извлечение fingerprint")
+print("2. Сохранение всех кук (включая cf_clearance)")
+print("3. Использование правильных заголовков запроса")
+print("=" * 60)
 
-# ================== 13. ЗАПУСК ==================
-print("🚀 Запуск API...")
-fetch_allowed_users()
-Thread(target=periodic_fetch, daemon=True).start()
-
+# Инициализируем пул сессий
 time.sleep(2)
-
-try:
-    if os.path.exists(TOKENS_FILE):
-        os.remove(TOKENS_FILE)
-        print(f"[INIT] Удалён старый файл {TOKENS_FILE}")
-except:
-    pass
-
-print("[INIT] Инициализация пула сессий...")
-init_token_pool_playwright()
+init_token_pool()
 
 def cleanup_sessions():
     while True:
@@ -959,12 +739,22 @@ def cleanup_sessions():
         for uid in expired:
             del active_sessions[uid]
             print(f"[SESSION] 🧹 Удалена сессия {uid}")
+        
+        # Также проверяем Playwright сессии
+        with PW_SESSIONS_LOCK:
+            for session in pw_sessions:
+                # Если сессия старая, обновляем ее
+                if now - session.get("created_at", 0) > 3600:  # 1 час
+                    print(f"[POOL] 🔄 Сессия {session.get('username')} устарела, обновляем...")
+                    refresh_session(session.get("username"))
+        
         time.sleep(300)
 
 Thread(target=cleanup_sessions, daemon=True).start()
 
 if __name__ == "__main__":
-    print(f"🌐 Сервер запущен на http://0.0.0.0:5000")
+    print(f"\n🌐 Сервер запущен на http://0.0.0.0:5000")
     print(f"📊 Для отладки: curl -H 'Authorization: Bearer {SECRET_TOKEN}' http://localhost:5000/api/debug/sessions")
-    print(f"🔧 Тестовый запрос: curl -X POST -H 'Authorization: Bearer {SECRET_TOKEN}' -H 'Content-Type: application/json' -d '{{\"endpoint\":\"/api/v3/search/fio\",\"params\":{{\"surname\":\"ТЕСТ\",\"limit\":2}}}}' http://localhost:5000/api/debug/test-request")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    print(f"🔧 Тестовый поиск: curl -X POST -H 'Authorization: Bearer {SECRET_TOKEN}' -H 'Content-Type: application/json' -d '{{\"query\":\"931229400494\",\"type\":\"iin\"}}' http://localhost:5000/api/debug/test-search")
+    print("\n✅ Готов к работе!")
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
