@@ -209,107 +209,150 @@ class PWManager:
     def _new_session_key(self, username: str) -> str:
         return f"{username}-{int(time.time())}-{random.randint(1000,9999)}"
 
-    def _login(self, username: str, password: str, show_browser: bool = False) -> dict:
-        if not self._pw:
-            return {"ok": False, "error": "playwright_not_ready"}
+    # Найдите функцию _login и замените блок логина на этот:
 
-        browser = None
-        try:
-            ua = random.choice(USER_AGENTS)
-            browser = self._pw.chromium.launch(
-                headless=not show_browser,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-blink-features=AutomationControlled"
-                ],
-                timeout=60000
-            )
-            
-            context = browser.new_context(
-                user_agent=ua,
-                viewport={"width": 1280, "height": 800},
-                locale="ru-RU",
-                timezone_id="Asia/Almaty",
-            )
-            
-            page: Page = context.new_page()
-            
-            # Скрываем webdriver
-            page.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-            """)
+def _login(self, username: str, password: str, show_browser: bool = False) -> dict:
+    if not self._pw:
+        return {"ok": False, "error": "playwright_not_ready"}
 
-            # КРИТИЧНО: Переходим на страницу логина и СРАЗУ генерируем fingerprint
-            print(f"[PLW] Переход на {LOGIN_PAGE}")
-            page.goto(LOGIN_PAGE, wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(2000)
-            
-            # Генерируем Device Fingerprint ДО логина
-            print(f"[PLW] Генерация Device Fingerprint...")
-            device_fp = page.evaluate(FINGERPRINT_SCRIPT)
-            print(f"[PLW] Device FP сгенерирован: {device_fp}")
-            
-            # Сохраняем в localStorage (если сайт так делает)
-            page.evaluate(f"""
-                () => {{
-                    try {{
-                        localStorage.setItem('deviceFingerprint', '{device_fp}');
-                        sessionStorage.setItem('deviceFingerprint', '{device_fp}');
-                    }} catch(e) {{}}
+    browser = None
+    try:
+        ua = random.choice(USER_AGENTS)
+        browser = self._pw.chromium.launch(
+            headless=not show_browser,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-blink-features=AutomationControlled"
+            ],
+            timeout=60000
+        )
+        
+        context = browser.new_context(
+            user_agent=ua,
+            viewport={"width": 1280, "height": 800},
+            locale="ru-RU",
+            timezone_id="Asia/Almaty",
+        )
+        
+        page: Page = context.new_page()
+        
+        # Скрываем webdriver
+        page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+        """)
+
+        print(f"[PLW] Переход на {LOGIN_PAGE}")
+        page.goto(LOGIN_PAGE, wait_until="networkidle", timeout=30000)
+        page.wait_for_timeout(2000)
+        
+        # Генерируем Device Fingerprint
+        print(f"[PLW] Генерация Device Fingerprint...")
+        device_fp = page.evaluate(FINGERPRINT_SCRIPT)
+        print(f"[PLW] Device FP: {device_fp}")
+        
+        # КРИТИЧНО: Находим скрытое поле для fingerprint или устанавливаем его
+        # Смотрим, есть ли на странице input для device fingerprint
+        page.evaluate(f"""
+            () => {{
+                // Сохраняем в localStorage/sessionStorage
+                try {{
+                    localStorage.setItem('deviceFingerprint', '{device_fp}');
+                    sessionStorage.setItem('deviceFingerprint', '{device_fp}');
+                }} catch(e) {{}}
+                
+                // Ищем скрытое поле или создаём его
+                let fpInput = document.querySelector('input[name="device_fingerprint"]') ||
+                              document.querySelector('input[name="deviceFingerprint"]') ||
+                              document.querySelector('input[id="device_fingerprint"]');
+                
+                if (!fpInput) {{
+                    // Создаём скрытое поле в форме логина
+                    const form = document.querySelector('form');
+                    if (form) {{
+                        fpInput = document.createElement('input');
+                        fpInput.type = 'hidden';
+                        fpInput.name = 'device_fingerprint';
+                        fpInput.value = '{device_fp}';
+                        form.appendChild(fpInput);
+                    }}
+                }} else {{
+                    fpInput.value = '{device_fp}';
                 }}
-            """)
-            
-            # Теперь логинимся
-            print(f"[PLW] Логин {username}...")
-            page.fill(LOGIN_SELECTOR, username)
-            page.wait_for_timeout(500)
-            page.fill(PASSWORD_SELECTOR, password)
-            page.wait_for_timeout(500)
-            page.click(SIGN_IN_BUTTON_SELECTOR)
-            
-            # Ждём перенаправления
-            print(f"[PLW] Ожидание dashboard...")
-            try:
-                page.wait_for_url("**/dashboard**", timeout=15000)
-            except:
-                pass
-            
-            page.wait_for_timeout(3000)
-            page.wait_for_load_state("networkidle", timeout=10000)
-
-            # Получаем cookies
-            cookies = context.cookies()
-            cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
-            
-            user_agent = page.evaluate("() => navigator.userAgent") or ua
-
-            if not cookie_header:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
-                return {"ok": False, "error": "no_cookie_header"}
-
-            session_key = self._new_session_key(username)
-
-            self._browser_by_key[session_key] = browser
-            self._context_by_key[session_key] = context
-            self._page_by_key[session_key] = page
-            self._session_meta_by_key[session_key] = {
-                "username": username,
-                "user_agent": user_agent,
-                "device_fingerprint": device_fp,
-                "cookie_header": cookie_header,
-                "time": int(time.time()),
+                
+                // Также устанавливаем глобальную переменную (если сайт использует)
+                window.deviceFingerprint = '{device_fp}';
+            }}
+        """)
+        
+        # Заполняем форму
+        print(f"[PLW] Логин {username}...")
+        page.fill(LOGIN_SELECTOR, username)
+        page.wait_for_timeout(500)
+        page.fill(PASSWORD_SELECTOR, password)
+        page.wait_for_timeout(500)
+        
+        # Перехватываем запрос на логин и добавляем fingerprint в заголовки
+        page.route("**/auth/login", lambda route, request: route.continue_(
+            headers={
+                **request.headers,
+                "x-device-fingerprint": device_fp
             }
+        ))
+        
+        page.click(SIGN_IN_BUTTON_SELECTOR)
+        
+        # Ждём перенаправления
+        print(f"[PLW] Ожидание dashboard...")
+        try:
+            page.wait_for_url("**/dashboard**", timeout=15000)
+        except:
+            pass
+        
+        page.wait_for_timeout(3000)
+        page.wait_for_load_state("networkidle", timeout=10000)
 
-            print(f"[PLW] ✅ {username} авторизован. key={session_key}")
-            print(f"[PLW] Device FP: {device_fp}")
-            return {"ok": True, "session_key": session_key, "meta": self._session_meta_by_key[session_key]}
+        # Получаем cookies
+        cookies = context.cookies()
+        cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
+        
+        user_agent = page.evaluate("() => navigator.userAgent") or ua
+
+        if not cookie_header:
+            try:
+                browser.close()
+            except Exception:
+                pass
+            return {"ok": False, "error": "no_cookie_header"}
+
+        session_key = self._new_session_key(username)
+
+        self._browser_by_key[session_key] = browser
+        self._context_by_key[session_key] = context
+        self._page_by_key[session_key] = page
+        self._session_meta_by_key[session_key] = {
+            "username": username,
+            "user_agent": user_agent,
+            "device_fingerprint": device_fp,
+            "cookie_header": cookie_header,
+            "time": int(time.time()),
+        }
+
+        print(f"[PLW] ✅ {username} авторизован. key={session_key}")
+        return {"ok": True, "session_key": session_key, "meta": self._session_meta_by_key[session_key]}
+
+    except Exception as e:
+        print(f"[PLW] ❌ Ошибка логина: {e}")
+        traceback.print_exc()
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
+        return {"ok": False, "error": str(e)}
 
         except Exception as e:
             print(f"[PLW] ❌ Ошибка логина: {e}")
