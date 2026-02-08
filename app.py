@@ -9,12 +9,12 @@ import base64
 from threading import Thread, Lock, Event
 from typing import Optional, Dict, List, Any
 from queue import Queue
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode
 
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from playwright.sync_api import sync_playwright, Page, BrowserContext
+from playwright.sync_api import sync_playwright, Page
 
 # ================== 1. НАСТРОЙКИ ==================
 BOT_TOKEN = "8545598161:AAGM6HtppAjUOuSAYH0mX5oNcPU0SuO59N4"
@@ -44,7 +44,9 @@ pw_cycle = None
 PW_SESSIONS_LOCK = Lock()
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 ]
 
 class ResponseLike:
@@ -64,51 +66,64 @@ FINGERPRINT_EXTRACTOR = """
     // Ищем fingerprint в разных местах
     let fp = null;
     
-    // 1. Проверяем localStorage (самое важное)
+    // 1. Проверяем localStorage
     try {
-        fp = localStorage.getItem('device_fingerprint') || 
-             localStorage.getItem('__device_fingerprint') ||
-             localStorage.getItem('fingerprint') ||
-             localStorage.getItem('deviceFingerprint');
+        const keys = Object.keys(localStorage);
+        for (let key of keys) {
+            if (key.toLowerCase().includes('fingerprint') || key.toLowerCase().includes('device')) {
+                const value = localStorage.getItem(key);
+                if (value && value.length >= 64) {
+                    fp = value;
+                    console.log('Найден в localStorage[' + key + ']');
+                    break;
+                }
+            }
+        }
     } catch(e) {}
     
     // 2. Проверяем sessionStorage
     if (!fp) {
         try {
-            fp = sessionStorage.getItem('device_fingerprint') || 
-                 sessionStorage.getItem('__device_fingerprint') ||
-                 sessionStorage.getItem('fingerprint') ||
-                 sessionStorage.getItem('deviceFingerprint');
+            const keys = Object.keys(sessionStorage);
+            for (let key of keys) {
+                if (key.toLowerCase().includes('fingerprint') || key.toLowerCase().includes('device')) {
+                    const value = sessionStorage.getItem(key);
+                    if (value && value.length >= 64) {
+                        fp = value;
+                        console.log('Найден в sessionStorage[' + key + ']');
+                        break;
+                    }
+                }
+            }
         } catch(e) {}
     }
     
     // 3. Проверяем глобальные переменные
     if (!fp) {
-        if (window.deviceFingerprint) fp = window.deviceFingerprint;
-        else if (window.__deviceFingerprint) fp = window.__deviceFingerprint;
-        else if (window.fingerprint) fp = window.fingerprint;
-    }
-    
-    // 4. Ищем скрытые поля в форме
-    if (!fp) {
-        const inputs = document.querySelectorAll('input[type="hidden"]');
-        for (let input of inputs) {
-            const name = input.name || input.id || '';
-            if ((name.includes('fingerprint') || name.includes('device')) && 
-                input.value && input.value.length >= 64) {
-                fp = input.value;
+        const globalVars = ['deviceFingerprint', '__deviceFingerprint', 'fingerprint', 'device_fingerprint'];
+        for (let varName of globalVars) {
+            if (window[varName] && window[varName].length >= 64) {
+                fp = window[varName];
+                console.log('Найден в window.' + varName);
                 break;
             }
         }
     }
     
-    // 5. Ищем в URL параметрах
+    // 4. Ищем в DOM
     if (!fp) {
-        const urlParams = new URLSearchParams(window.location.search);
-        fp = urlParams.get('fingerprint') || urlParams.get('device_fingerprint');
+        const inputs = document.querySelectorAll('input[type="hidden"]');
+        for (let input of inputs) {
+            const name = (input.name || input.id || '').toLowerCase();
+            const value = input.value || '';
+            if ((name.includes('fingerprint') || name.includes('device')) && value.length >= 64) {
+                fp = value;
+                console.log('Найден в скрытом поле: ' + name);
+                break;
+            }
+        }
     }
     
-    console.log('Найден fingerprint:', fp ? fp.substring(0, 20) + '...' : 'не найден');
     return fp;
 }
 """
@@ -201,6 +216,8 @@ class PWManager:
                     resp = self._cmd_close_key(payload)
                 elif cmd == "get_page_content":
                     resp = self._cmd_get_page_content(payload)
+                elif cmd == "simple_login":
+                    resp = self._cmd_simple_login(payload)
                 else:
                     resp = {"ok": False, "error": f"unknown_cmd:{cmd}"}
             except Exception as e:
@@ -213,43 +230,11 @@ class PWManager:
     def _new_session_key(self, username: str) -> str:
         return f"{username}-{int(time.time())}-{random.randint(1000,9999)}"
 
-    def _extract_fingerprint_from_network(self, page: Page, timeout: int = 10000) -> Optional[str]:
-        """Извлекает fingerprint из перехваченных сетевых запросов"""
-        fingerprint = None
-        start_time = time.time()
+    def _cmd_simple_login(self, payload: dict) -> dict:
+        """Простой логин без сложного перехвата"""
+        username = payload.get("username")
+        password = payload.get("password")
         
-        def on_request(request):
-            nonlocal fingerprint
-            # Проверяем заголовки запроса
-            headers = request.headers
-            if 'x-device-fingerprint' in headers:
-                fp = headers['x-device-fingerprint']
-                if fp and len(fp) >= 64:
-                    fingerprint = fp
-                    print(f"[NETWORK] Найден fingerprint в запросе: {fp[:20]}...")
-            
-            # Проверяем тело POST запроса
-            if request.method == "POST" and request.post_data:
-                try:
-                    data = json.loads(request.post_data)
-                    if 'device_fingerprint' in data:
-                        fp = data['device_fingerprint']
-                        if fp and len(fp) >= 64:
-                            fingerprint = fp
-                            print(f"[NETWORK] Найден fingerprint в теле: {fp[:20]}...")
-                except:
-                    pass
-        
-        page.on("request", on_request)
-        
-        # Ждём пока не найдём fingerprint или не истечёт время
-        while not fingerprint and (time.time() - start_time) < (timeout / 1000):
-            time.sleep(0.1)
-        
-        page.remove_listener("request", on_request)
-        return fingerprint
-
-    def _login(self, username: str, password: str, show_browser: bool = False) -> dict:
         if not self._pw:
             return {"ok": False, "error": "playwright_not_ready"}
 
@@ -257,7 +242,7 @@ class PWManager:
         try:
             ua = random.choice(USER_AGENTS)
             
-            # ВСЕГДА headless на сервере
+            # Упрощённый запуск
             browser = self._pw.chromium.launch(
                 headless=True,
                 args=[
@@ -266,247 +251,72 @@ class PWManager:
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
                     "--disable-blink-features=AutomationControlled",
-                    "--disable-web-security",
-                    "--disable-features=IsolateOrigins,site-per-process"
                 ],
                 timeout=60000
             )
             
-            # Создаём контекст с правильными настройками
             context = browser.new_context(
                 user_agent=ua,
                 viewport={"width": 1920, "height": 1080},
                 locale="ru-RU",
                 timezone_id="Asia/Almaty",
-                permissions=["geolocation"],
                 ignore_https_errors=True,
             )
             
             page: Page = context.new_page()
             
-            # Скрываем webdriver
+            # Минимальный скрипт для скрытия automation
             page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
                 window.chrome = {runtime: {}};
             """)
 
-            print(f"[PLW] Переход на {LOGIN_PAGE}")
+            print(f"[PLW-SIMPLE] Переход на {LOGIN_PAGE}")
             
-            # Перехватываем ВСЕ запросы для поиска fingerprint
-            captured_fingerprint = None
-            def capture_fingerprint(request):
-                nonlocal captured_fingerprint
-                # Проверяем заголовки
-                headers = request.headers
-                if 'x-device-fingerprint' in headers:
-                    fp = headers['x-device-fingerprint']
-                    if fp and len(fp) >= 64 and not captured_fingerprint:
-                        captured_fingerprint = fp
-                        print(f"[NETWORK] Захвачен fingerprint из заголовка: {fp[:20]}...")
-                
-                # Продолжаем запрос
-                request.continue_()
+            # Простая загрузка с меньшим таймаутом
+            page.goto(LOGIN_PAGE, wait_until="domcontentloaded", timeout=15000)
+            page.wait_for_timeout(2000)
             
-            page.route("**/*", capture_fingerprint)
-            
-            # Загружаем страницу
-            page.goto(LOGIN_PAGE, wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(3000)
-            
-            # Ищем fingerprint на странице
-            print(f"[PLW] Поиск Device Fingerprint на странице...")
+            # Ищем fingerprint после загрузки
             device_fp = page.evaluate(FINGERPRINT_EXTRACTOR)
-            
-            if not device_fp and captured_fingerprint:
-                device_fp = captured_fingerprint
-                print(f"[PLW] Используем fingerprint из сетевого запроса")
-            
             if not device_fp:
-                # Пробуем кликнуть на поле и подождать
-                print(f"[PLW] Пробуем активировать скрипты сайта...")
-                page.click(LOGIN_SELECTOR)
-                page.wait_for_timeout(2000)
-                device_fp = page.evaluate(FINGERPRINT_EXTRACTOR)
+                # Создаём простой fingerprint если сайт не предоставляет
+                import hashlib
+                fp_data = f"{ua}{int(time.time())}{username}"
+                device_fp = hashlib.sha256(fp_data.encode()).hexdigest()
+                print(f"[PLW-SIMPLE] Создан fingerprint: {device_fp[:20]}...")
             
-            if not device_fp:
-                # Пробуем найти в localStorage более тщательно
-                storage_content = page.evaluate("""() => {
-                    const items = {};
-                    for (let i = 0; i < localStorage.length; i++) {
-                        const key = localStorage.key(i);
-                        items[key] = localStorage.getItem(key);
-                    }
-                    return items;
-                }""")
-                
-                print(f"[PLW] Содержимое localStorage: {json.dumps(storage_content, indent=2)}")
-                
-                # Ищем любой ключ с fingerprint
-                for key, value in storage_content.items():
-                    if 'fingerprint' in key.lower() and value and len(value) >= 64:
-                        device_fp = value
-                        print(f"[PLW] Найден fingerprint в localStorage[{key}]: {value[:20]}...")
-                        break
-            
-            if not device_fp:
-                # Последняя попытка: делаем скриншот для отладки
-                try:
-                    page.screenshot(path="debug_no_fingerprint.png")
-                    print(f"[PLW] 📸 Скриншот сохранен в debug_no_fingerprint.png")
-                except:
-                    pass
-                return {"ok": False, "error": "fingerprint_not_found", "details": "Не удалось найти fingerprint на сайте"}
-            
-            print(f"[PLW] Device FP найден: {device_fp[:20]}...")
-            
-            # Сохраняем fingerprint для использования в запросах
-            page.evaluate(f"""
-                (fp) => {{
-                    try {{
-                        localStorage.setItem('device_fingerprint', fp);
-                        sessionStorage.setItem('device_fingerprint', fp);
-                        window.deviceFingerprint = fp;
-                        console.log('Fingerprint сохранен для сессии:', fp.substring(0, 20) + '...');
-                    }} catch(e) {{ 
-                        console.error('Ошибка сохранения fingerprint:', e); 
-                    }}
-                }}
-            """, device_fp)
-            
-            # Добавляем скрытое поле в форму если нужно
-            page.evaluate(f"""
-                (fp) => {{
-                    const form = document.querySelector('form');
-                    if (form) {{
-                        let fpField = form.querySelector('input[name="device_fingerprint"]');
-                        if (!fpField) {{
-                            fpField = document.createElement('input');
-                            fpField.type = 'hidden';
-                            fpField.name = 'device_fingerprint';
-                            fpField.value = fp;
-                            form.appendChild(fpField);
-                            console.log('Добавлено поле device_fingerprint в форму');
-                        }}
-                    }}
-                }}
-            """, device_fp)
-            
-            # Заполняем форму логина
-            print(f"[PLW] Логин {username}...")
+            # Заполняем форму
             page.fill(LOGIN_SELECTOR, username)
             page.wait_for_timeout(500)
             page.fill(PASSWORD_SELECTOR, password)
             page.wait_for_timeout(500)
             
-            # Отключаем общий перехватчик и устанавливаем специфичный для логина
-            page.unroute("**/*", capture_fingerprint)
-            
-            # Перехватываем только запрос логина чтобы добавить заголовки
-            def add_fingerprint_to_login(route, request):
-                headers = dict(request.headers)
-                headers['x-device-fingerprint'] = device_fp
-                headers['origin'] = 'https://pena.rest'
-                headers['referer'] = 'https://pena.rest/auth/login'
-                
-                # Если есть тело запроса, добавляем fingerprint и туда
-                if request.method == "POST" and request.post_data:
-                    try:
-                        data = json.loads(request.post_data)
-                        data['device_fingerprint'] = device_fp
-                        post_data = json.dumps(data)
-                        route.continue_(headers=headers, post_data=post_data)
-                        return
-                    except:
-                        pass
-                
-                route.continue_(headers=headers)
-            
-            page.route("**/auth/login", add_fingerprint_to_login)
-            
-            # Нажимаем кнопку входа
+            # Нажимаем кнопку
             page.click(SIGN_IN_BUTTON_SELECTOR)
             
-            # Ждём успешного входа
-            print(f"[PLW] Ожидание dashboard...")
+            # Ждём с меньшим таймаутом
             try:
-                page.wait_for_url("**/dashboard**", timeout=25000)
-                print(f"[PLW] ✅ Успешный вход в dashboard")
-            except Exception as e:
-                # Проверяем текущий URL
+                page.wait_for_url("**/dashboard**", timeout=10000)
+                print(f"[PLW-SIMPLE] ✅ Успешный вход")
+            except:
+                # Проверяем есть ли ошибка
+                error_text = page.evaluate("""() => document.body.innerText""")
+                if "неверный" in error_text.lower():
+                    raise Exception("Неверный логин или пароль")
+                # Возможно уже залогинены
                 current_url = page.url
-                print(f"[PLW] Текущий URL: {current_url}")
-                
-                # Проверяем есть ли ошибки на странице
-                page_content = page.content()
-                if "неверный" in page_content.lower() or "ошибка" in page_content.lower():
-                    error_msg = page_content[:500]
-                    raise Exception(f"Ошибка логина: {error_msg}")
-                
-                if "dashboard" not in current_url:
-                    # Делаем скриншот для отладки
-                    try:
-                        page.screenshot(path="debug_login_failed.png")
-                        print(f"[PLW] 📸 Скриншот сохранен в debug_login_failed.png")
-                    except:
-                        pass
-                    raise Exception(f"Не удалось войти в систему. URL: {current_url}")
+                print(f"[PLW-SIMPLE] Текущий URL: {current_url}")
             
-            page.wait_for_timeout(3000)
-            page.wait_for_load_state("networkidle", timeout=10000)
-
+            page.wait_for_timeout(2000)
+            
             # Получаем cookies
             cookies = context.cookies()
             cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
             
-            # Извлекаем и проверяем JWT токен
-            access_token_ws = None
-            for cookie in cookies:
-                if cookie['name'] == 'access_token_ws':
-                    access_token_ws = cookie['value']
-                    break
-            
-            if access_token_ws:
-                try:
-                    # Декодируем JWT чтобы проверить fingerprint
-                    jwt_parts = access_token_ws.split('.')
-                    if len(jwt_parts) >= 2:
-                        # Добавляем padding если нужно
-                        payload_encoded = jwt_parts[1]
-                        padding = 4 - len(payload_encoded) % 4
-                        if padding != 4:
-                            payload_encoded += "=" * padding
-                        
-                        payload_decoded = base64.b64decode(payload_encoded)
-                        jwt_data = json.loads(payload_decoded)
-                        jwt_fp = jwt_data.get('device_fp_hash')
-                        if jwt_fp:
-                            print(f"[PLW] JWT device_fp_hash: {jwt_fp[:20]}...")
-                            if jwt_fp != device_fp:
-                                print(f"[PLW] ⚠️ Fingerprint в JWT не совпадает с нашим!")
-                                print(f"[PLW]   Наш: {device_fp[:20]}...")
-                                print(f"[PLW]   JWT: {jwt_fp[:20]}...")
-                                # Пробуем использовать fingerprint из JWT
-                                device_fp = jwt_fp
-                except Exception as e:
-                    print(f"[PLW] Ошибка декодирования JWT: {e}")
-            
-            # Проверяем важные cookies
-            required_cookies = ['access_token', 'access_token_ws', 'aegis_session', 'csrf_token']
-            found_cookies = [c['name'] for c in cookies]
-            missing_cookies = [c for c in required_cookies if c not in found_cookies]
-            if missing_cookies:
-                print(f"[PLW] ⚠️ Отсутствуют важные cookies: {missing_cookies}")
-            
-            user_agent = page.evaluate("() => navigator.userAgent") or ua
-
             if not cookie_header:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
-                return {"ok": False, "error": "no_cookie_header"}
-
+                raise Exception("No cookies received")
+            
             session_key = self._new_session_key(username)
 
             self._browser_by_key[session_key] = browser
@@ -514,28 +324,28 @@ class PWManager:
             self._page_by_key[session_key] = page
             self._session_meta_by_key[session_key] = {
                 "username": username,
-                "user_agent": user_agent,
+                "user_agent": ua,
                 "device_fingerprint": device_fp,
                 "cookie_header": cookie_header,
+                "cookies": cookies,
                 "time": int(time.time()),
-                "cookies": cookies,  # Сохраняем полные cookies
             }
 
-            print(f"[PLW] ✅ {username} авторизован. key={session_key}")
-            print(f"[PLW] Cookie header длина: {len(cookie_header)}")
-            print(f"[PLW] Всего cookies: {len(cookies)}")
-            
+            print(f"[PLW-SIMPLE] ✅ {username} авторизован")
             return {"ok": True, "session_key": session_key, "meta": self._session_meta_by_key[session_key]}
 
         except Exception as e:
-            print(f"[PLW] ❌ Ошибка логина: {e}")
-            traceback.print_exc()
+            print(f"[PLW-SIMPLE] ❌ Ошибка: {e}")
             try:
                 if browser:
                     browser.close()
-            except Exception:
+            except:
                 pass
             return {"ok": False, "error": str(e)}
+
+    def _login(self, username: str, password: str, show_browser: bool = False) -> dict:
+        # Используем простой метод
+        return self._cmd_simple_login({"username": username, "password": password})
 
     def _cmd_close_key(self, payload: dict) -> dict:
         key = payload.get("session_key")
@@ -571,7 +381,6 @@ class PWManager:
         username = payload.get("username")
         password = payload.get("password")
         old_key = payload.get("old_session_key")
-        show_browser = bool(payload.get("show_browser", False))
 
         if not username or not password:
             return {"ok": False, "error": "username_or_password_missing"}
@@ -581,8 +390,7 @@ class PWManager:
             self._cmd_close_key({"session_key": old_key})
         
         # Создаём новую
-        r = self._login(username, password, show_browser=show_browser)
-        return r
+        return self._login(username, password, show_browser=False)
 
     def _cmd_fetch_get(self, payload: dict) -> dict:
         key = payload.get("session_key")
@@ -596,50 +404,24 @@ class PWManager:
             return {"ok": False, "error": "page_not_found_for_key"}
 
         device_fp = meta.get("device_fingerprint", "")
-        cookies = meta.get("cookies", [])
 
-        # Делаем запрос через fetch с правильными заголовками
+        # Простой запрос через fetch
         js = """
         async (args) => {
-          const { url, deviceFp, cookies } = args;
+          const { url, deviceFp } = args;
           try {
-            // Устанавливаем cookies если нужно
-            if (cookies && cookies.length > 0) {
-              for (const cookie of cookies) {
-                try {
-                  document.cookie = `${cookie.name}=${cookie.value}; domain=${cookie.domain}; path=${cookie.path}; ${cookie.secure ? 'secure;' : ''} ${cookie.httpOnly ? 'HttpOnly;' : ''}`;
-                } catch(e) {
-                  console.warn('Не удалось установить cookie', cookie.name, e);
-                }
-              }
-            }
-            
-            // Получаем актуальный fingerprint
-            let actualFp = deviceFp;
-            try {
-              const stored = localStorage.getItem('device_fingerprint') || 
-                             sessionStorage.getItem('device_fingerprint') ||
-                             window.deviceFingerprint;
-              if (stored) actualFp = stored;
-            } catch(e) {
-              console.warn('Ошибка получения fingerprint из хранилища:', e);
-            }
-            
             const headers = {
               'Accept': 'application/json',
               'Content-Type': 'application/json',
-              'x-device-fingerprint': actualFp,
+              'x-device-fingerprint': deviceFp,
               'x-requested-with': 'XMLHttpRequest',
               'referer': 'https://pena.rest/dashboard',
               'origin': 'https://pena.rest'
             };
             
-            console.log('Отправка запроса к:', url);
-            console.log('Используем fingerprint:', actualFp.substring(0, 20) + '...');
-            
             const r = await fetch(url, { 
               method: "GET", 
-              credentials: "include",  // ВАЖНО: включаем cookies
+              credentials: "include",
               headers: headers,
               mode: "cors"
             });
@@ -649,22 +431,16 @@ class PWManager:
             try { 
               jsn = JSON.parse(txt); 
             } catch (e) {
-              console.warn('Не удалось распарсить JSON ответ:', e.message);
-            }
-            
-            console.log('Ответ от сервера:', r.status, r.statusText);
-            if (!r.ok) {
-              console.log('Текст ошибки:', txt.substring(0, 300));
+              // Не критично если не JSON
             }
             
             return { ok: r.ok, status: r.status, text: txt, json: jsn };
           } catch (e) {
-            console.error('Ошибка при выполнении fetch:', e);
             return { ok: false, status: 0, text: String(e), json: null, error: String(e) };
           }
         }
         """
-        out = page.evaluate(js, {"url": url, "deviceFp": device_fp, "cookies": cookies})
+        out = page.evaluate(js, {"url": url, "deviceFp": device_fp})
         return {"ok": True, "out": out}
     
     def _cmd_get_page_content(self, payload: dict) -> dict:
@@ -681,7 +457,7 @@ class PWManager:
             content = page.content()
             url = page.url
             title = page.title()
-            return {"ok": True, "content": content[:5000], "url": url, "title": title}
+            return {"ok": True, "content": content[:2000], "url": url, "title": title}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -693,8 +469,8 @@ pw_manager.ready.wait(30)
 def init_token_pool_playwright(show_browser: bool = False):
     global pw_sessions, pw_cycle
 
-    print("[POOL] 🔄 Логин через Playwright...")
-    resp = pw_manager._rpc("init_pool", {"show_browser": show_browser}, timeout=180)  # Увеличили таймаут
+    print("[POOL] 🔄 Логин через Playwright (упрощённый)...")
+    resp = pw_manager._rpc("init_pool", {"show_browser": show_browser}, timeout=120)
 
     if not resp.get("ok"):
         print(f"[POOL] ❌ init_pool failed: {resp.get('error')}")
@@ -767,8 +543,8 @@ def refresh_token_for_username(username: str) -> Optional[Dict]:
         print(f"[AUTH] 🔄 Обновление сессии для {username}...")
         resp = pw_manager._rpc(
             "refresh_user",
-            {"username": username, "password": password, "old_session_key": old_key, "show_browser": False},
-            timeout=180
+            {"username": username, "password": password, "old_session_key": old_key},
+            timeout=120
         )
 
         if not resp.get("ok"):
@@ -832,22 +608,13 @@ def crm_get(endpoint: str, params: dict = None):
     key = sess.get("session_key")
     device_fp = sess.get("device_fingerprint", "")[:20] + "..." if sess.get("device_fingerprint") else "нет"
 
-    print(f"[CRM] {sess['username']} -> {endpoint}")
-    print(f"[CRM] URL: {url}")
-    print(f"[CRM] Fingerprint: {device_fp}")
-    print(f"[CRM] Cookies count: {len(sess.get('cookies', []))}")
+    print(f"[CRM] {sess['username']} -> {endpoint} (FP: {device_fp})")
 
     resp = pw_manager._rpc("fetch_get", {"session_key": key, "url": url}, timeout=60)
     if not resp.get("ok"):
         uname = sess.get("username")
         error_msg = resp.get('error', 'unknown')
         print(f"[AUTH] {uname} → fetch error: {error_msg}")
-        
-        # Пробуем получить содержимое страницы для отладки
-        debug_resp = pw_manager._rpc("get_page_content", {"session_key": key}, timeout=10)
-        if debug_resp.get("ok"):
-            print(f"[DEBUG] Текущий URL: {debug_resp.get('url')}")
-            print(f"[DEBUG] Заголовок: {debug_resp.get('title')}")
         
         # Обновляем сессию
         print(f"[AUTH] Пробуем обновить сессию...")
@@ -869,7 +636,6 @@ def crm_get(endpoint: str, params: dict = None):
     if status in (401, 403):
         uname = sess["username"]
         print(f"[AUTH] {uname} → {status} → Ошибка аутентификации")
-        print(f"[AUTH] Текст ответа: {txt[:500]}")
         
         # Пробуем обновить сессию
         new_sess = refresh_token_for_username(uname)
@@ -882,14 +648,12 @@ def crm_get(endpoint: str, params: dict = None):
                 txt = out2.get("text", "") or ""
                 jsn = out2.get("json", None)
                 print(f"[CRM] После обновления: {status}")
-            else:
-                print(f"[CRM] Ошибка после обновления: {resp2.get('error')}")
     
     return ResponseLike(status_code=status, text=txt, json_data=jsn)
 
 # ================== 9. ОЧЕРЕДЬ CRM ==================
 crm_queue = Queue()
-RESULT_TIMEOUT = 60  # Увеличили таймаут
+RESULT_TIMEOUT = 60
 
 def crm_worker():
     while True:
@@ -897,7 +661,7 @@ def crm_worker():
             func, args, kwargs, result_box = crm_queue.get()
             res = func(*args, **kwargs)
             result_box["result"] = res
-            time.sleep(random.uniform(2.0, 3.0))  # Увеличили задержку
+            time.sleep(random.uniform(2.0, 3.0))
         except Exception as e:
             result_box["error"] = str(e)
         finally:
@@ -952,7 +716,6 @@ def search_by_iin(iin: str):
     if resp.status_code == 404:
         return "⚠️ Ничего не найдено по ИИН."
     if resp.status_code != 200:
-        # Пытаемся получить больше информации об ошибке
         error_text = resp.text
         if "device fingerprint" in error_text.lower():
             return f"❌ Ошибка аутентификации (fingerprint). Пожалуйста, попробуйте позже."
@@ -996,7 +759,7 @@ def search_by_phone(phone: str):
         f"🧾 ИИН: <code>{p.get('iin','')}</code>\n"
         f"📅 Дата рождения: {p.get('birthday','')}\n"
         f"🚻 Пол: {p.get('sex','')}\n"
-        f"📱 Телефон: {p.get('phone_number','')}\n"
+        f"📱 Телефон: {p.get('phone_number','')}</code>\n"
         f"🏠 Адрес: {p.get('address','')}"
     )
 
@@ -1161,7 +924,6 @@ def debug_force_refresh():
         else:
             return jsonify({"ok": False, "error": f"Не удалось обновить сессию для {username}"})
     else:
-        # Переинициализируем весь пул
         init_token_pool_playwright()
         return jsonify({"ok": True, "message": "Весь пул сессий переинициализирован"})
 
@@ -1171,9 +933,9 @@ fetch_allowed_users()
 Thread(target=periodic_fetch, daemon=True).start()
 
 # Даём немного времени перед инициализацией
-time.sleep(3)
+time.sleep(2)
 
-# Удаляем старый tokens.json чтобы начать с чистого листа
+# Удаляем старый tokens.json если есть
 try:
     if os.path.exists(TOKENS_FILE):
         os.remove(TOKENS_FILE)
@@ -1182,6 +944,7 @@ except:
     pass
 
 # Инициализируем пул сессий
+print("[INIT] Инициализация пула сессий...")
 init_token_pool_playwright(show_browser=False)
 
 def cleanup_sessions():
