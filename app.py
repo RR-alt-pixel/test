@@ -785,34 +785,25 @@ def enqueue_crm_get(endpoint, params=None):
 
 # ================== 8. ПОИСКОВЫЕ ФУНКЦИИ ==================
 def search_by_iin(iin: str):
-    print(f"[SEARCH IIN] 🔍 Поиск по ИИН: {iin}")
     r = enqueue_crm_get("/api/v3/search/iin", params={"iin": iin})
+
     if r["status"] != "ok":
         return "⌛ Ваш запрос в очереди."
+
     resp = r["result"]
+
     if isinstance(resp, str):
         return resp
-    if resp.status_code == 404:
-        return "⚠️ Ничего не найдено по ИИН."
+
     if resp.status_code != 200:
-        return f"❌ Ошибка {resp.status_code}"
-    
-    data = resp.json()
-    if not isinstance(data, list) or not data:
-        return "⚠️ Ничего не найдено по ИИН."
-    
-    results = []
-    for i, p in enumerate(data[:5], 1):
-        result = f"{i}. 🧾 <b>ИИН: {p.get('iin','')}</b>"
-        if p.get('snf'):
-            result += f"\n   👤 {p.get('snf','')}"
-        if p.get('phone_number'):
-            result += f"\n   📱 {p.get('phone_number','')}"
-        if p.get('birthday'):
-            result += f"\n   📅 {p.get('birthday','')}"
-        results.append(result)
-    
-    return "\n\n".join(results)
+        return f"❌ Ошибка {resp.status_code}: {resp.text}"
+
+    # 👉 ВОТ ГЛАВНОЕ
+    try:
+        return json.dumps(resp.json(), ensure_ascii=False, indent=2)
+    except Exception:
+        return resp.text
+
 
 def search_by_phone(phone: str):
     clean = ''.join(filter(str.isdigit, phone))
