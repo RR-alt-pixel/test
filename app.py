@@ -1,4 +1,4 @@
-# server_fixed.py
+# server_fixed.py (исправленная версия)
 import os
 import time
 import json
@@ -622,18 +622,23 @@ class SessionManager:
                     print(f"🔄 Используем сессию {session.account['username']} для запроса: {query}")
                     
                     # Выполняем поиск
-                    result = session.execute_task("search", query)
+                    task_result = session.execute_task("search", query)
                     
-                    # Сохраняем в кэш при успехе
-                    if result.get("success"):
-                        with self.cache_lock:
-                            self.cache[cache_key] = {
-                                "result": result,
-                                "timestamp": time.time(),
-                                "query": query
-                            }
-                    
-                    return result
+                    # Если execute_task вернул {"success": True, "result": actual_result}
+                    if task_result.get('success'):
+                        actual_result = task_result.get('result')
+                        # Сохраняем в кэш при успехе
+                        if actual_result and actual_result.get("success"):
+                            with self.cache_lock:
+                                self.cache[cache_key] = {
+                                    "result": actual_result,  # Сохраняем actual_result, а не task_result
+                                    "timestamp": time.time(),
+                                    "query": query
+                                }
+                        
+                        return actual_result  # Возвращаем actual_result напрямую
+                    else:
+                        return {"success": False, "error": task_result.get('error', 'Ошибка выполнения задачи')}
         
         return {"success": False, "error": "Нет доступных сессий"}
     
