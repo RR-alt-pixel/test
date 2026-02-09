@@ -273,38 +273,62 @@ class PenaSession:
         try:
             # Определяем тип поиска
             if query.isdigit() and len(query) == 12:
+                print(f"🔍 Поиск по ИИН: {query}")
                 return self._search_iin(query)
             elif query.startswith(("+", "8", "7")):
+                print(f"🔍 Поиск по телефону: {query}")
                 return self._search_phone(query)
             else:
+                print(f"🔍 Поиск по ФИО: {query}")
                 return self._search_fio(query)
                 
         except Exception as e:
+            print(f"❌ Исключение в search: {e}")
+            traceback.print_exc()
             return {"success": False, "error": str(e)}
     
     def _search_iin(self, iin: str) -> Dict:
         """Поиск по ИИН"""
         try:
             url = urljoin(BASE_URL, f"/api/v3/search/iin?iin={iin}")
+            print(f"🌐 Запрос к URL: {url}")
             response = self.context.request.get(url, headers=self.headers, timeout=30000)
+            
+            print(f"📡 Статус ответа: {response.status}")
             
             if response.status == 200:
                 data = response.json()
                 
+                # Логируем полученные данные для отладки
+                print(f"📊 Получены данные от pena.rest: {json.dumps(data, ensure_ascii=False)[:200]}...")
+                
                 if not isinstance(data, list) or not data:
                     formatted = "⚠️ Ничего не найдено по ИИН."
+                    print("ℹ️ Данные пустые или не список")
                 else:
                     results = []
                     for i, p in enumerate(data[:5], 1):
-                        result = f"{i}. 🧾 <b>ИИН: {p.get('iin','')}</b>"
-                        if p.get('snf'):
-                            result += f"\n   👤 {p.get('snf','')}"
-                        if p.get('phone_number'):
-                            result += f"\n   📱 {p.get('phone_number','')}"
-                        if p.get('birthday'):
-                            result += f"\n   📅 {p.get('birthday','')}"
-                        results.append(result)
+                        # Проверяем, что p - это словарь
+                        if isinstance(p, dict):
+                            result = f"{i}. 🧾 <b>ИИН: {p.get('iin', 'Нет')}</b>"
+                            if p.get('snf'):
+                                result += f"\n   👤 {p.get('snf', '')}"
+                            if p.get('phone_number'):
+                                result += f"\n   📱 {p.get('phone_number', '')}"
+                            if p.get('birthday'):
+                                result += f"\n   📅 {p.get('birthday', '')}"
+                            # Добавляем дополнительную информацию, если есть
+                            if p.get('address'):
+                                result += f"\n   🏠 {p.get('address', '')}"
+                            if p.get('nationality'):
+                                result += f"\n   🇰🇿 Национальность: {p.get('nationality', '')}"
+                            results.append(result)
+                        else:
+                            print(f"⚠️ Элемент не является словарем: {p}")
                     formatted = "\n\n".join(results)
+                
+                print(f"📝 Отформатированный результат: {formatted[:100]}...")
+                print(f"📏 Длина отформатированного результата: {len(formatted)}")
                 
                 return {
                     "success": True,
@@ -315,6 +339,7 @@ class PenaSession:
                     "status_code": response.status
                 }
             elif response.status == 404:
+                print("ℹ️ Ответ 404 - ничего не найдено")
                 return {
                     "success": True,
                     "search_type": "iin",
@@ -324,6 +349,7 @@ class PenaSession:
                 }
             else:
                 error_text = response.text()[:500]
+                print(f"❌ Ошибка HTTP {response.status}: {error_text}")
                 return {
                     "success": False,
                     "error": f"HTTP {response.status}: {error_text}",
@@ -331,6 +357,8 @@ class PenaSession:
                 }
                 
         except Exception as e:
+            print(f"❌ Исключение в _search_iin: {e}")
+            traceback.print_exc()
             return {"success": False, "error": str(e)}
     
     def _search_phone(self, phone: str) -> Dict:
@@ -342,23 +370,32 @@ class PenaSession:
                 clean = "7" + clean[1:]
             
             url = urljoin(BASE_URL, f"/api/v3/search/phone?phone={clean}&limit=10")
+            print(f"🌐 Запрос к URL: {url}")
             response = self.context.request.get(url, headers=self.headers, timeout=30000)
+            
+            print(f"📡 Статус ответа: {response.status}")
             
             if response.status == 200:
                 data = response.json()
+                print(f"📊 Получены данные от pena.rest: {json.dumps(data, ensure_ascii=False)[:200]}...")
                 
                 if not isinstance(data, list) or not data:
                     formatted = f"⚠️ Ничего не найдено по номеру {phone}"
                 else:
                     results = []
                     for i, p in enumerate(data[:5], 1):
-                        result = f"{i}. 📱 <b>Телефон: {p.get('phone_number','')}</b>"
-                        if p.get('snf'):
-                            result += f"\n   👤 {p.get('snf','')}"
-                        if p.get('iin'):
-                            result += f"\n   🧾 ИИН: {p.get('iin','')}"
-                        results.append(result)
+                        if isinstance(p, dict):
+                            result = f"{i}. 📱 <b>Телефон: {p.get('phone_number','')}</b>"
+                            if p.get('snf'):
+                                result += f"\n   👤 {p.get('snf','')}"
+                            if p.get('iin'):
+                                result += f"\n   🧾 ИИН: {p.get('iin','')}"
+                            if p.get('birthday'):
+                                result += f"\n   📅 {p.get('birthday','')}"
+                            results.append(result)
                     formatted = "\n\n".join(results)
+                
+                print(f"📝 Отформатированный результат: {formatted[:100]}...")
                 
                 return {
                     "success": True,
@@ -378,6 +415,7 @@ class PenaSession:
                 }
             else:
                 error_text = response.text()[:500]
+                print(f"❌ Ошибка HTTP {response.status}: {error_text}")
                 return {
                     "success": False,
                     "error": f"HTTP {response.status}: {error_text}",
@@ -385,6 +423,8 @@ class PenaSession:
                 }
                 
         except Exception as e:
+            print(f"❌ Исключение в _search_phone: {e}")
+            traceback.print_exc()
             return {"success": False, "error": str(e)}
     
     def _search_fio(self, text: str) -> Dict:
@@ -421,25 +461,32 @@ class PenaSession:
             
             query_string = urlencode(params)
             url = urljoin(BASE_URL, f"/api/v3/search/fio?{query_string}")
+            print(f"🌐 Запрос к URL: {url}")
             response = self.context.request.get(url, headers=self.headers, timeout=30000)
+            
+            print(f"📡 Статус ответа: {response.status}")
             
             if response.status == 200:
                 data = response.json()
+                print(f"📊 Получены данные от pena.rest: {json.dumps(data, ensure_ascii=False)[:200]}...")
                 
                 if not isinstance(data, list) or not data:
                     formatted = "⚠️ Ничего не найдено."
                 else:
                     results = []
                     for i, p in enumerate(data[:10], 1):
-                        result = f"{i}. 👤 <b>{p.get('snf','')}</b>"
-                        if p.get('iin'):
-                            result += f"\n   🧾 ИИН: {p.get('iin','')}"
-                        if p.get('birthday'):
-                            result += f"\n   📅 Дата рождения: {p.get('birthday','')}"
-                        if p.get('phone_number'):
-                            result += f"\n   📱 Телефон: {p.get('phone_number','')}"
-                        results.append(result)
+                        if isinstance(p, dict):
+                            result = f"{i}. 👤 <b>{p.get('snf','')}</b>"
+                            if p.get('iin'):
+                                result += f"\n   🧾 ИИН: {p.get('iin','')}"
+                            if p.get('birthday'):
+                                result += f"\n   📅 Дата рождения: {p.get('birthday','')}"
+                            if p.get('phone_number'):
+                                result += f"\n   📱 Телефон: {p.get('phone_number','')}"
+                            results.append(result)
                     formatted = "📌 Результаты поиска по ФИО:\n\n" + "\n".join(results)
+                
+                print(f"📝 Отформатированный результат: {formatted[:100]}...")
                 
                 return {
                     "success": True,
@@ -459,6 +506,7 @@ class PenaSession:
                 }
             else:
                 error_text = response.text()[:500]
+                print(f"❌ Ошибка HTTP {response.status}: {error_text}")
                 return {
                     "success": False,
                     "error": f"HTTP {response.status}: {error_text}",
@@ -466,6 +514,8 @@ class PenaSession:
                 }
                 
         except Exception as e:
+            print(f"❌ Исключение в _search_fio: {e}")
+            traceback.print_exc()
             return {"success": False, "error": str(e)}
     
     def execute_task(self, method_name: str, *args, **kwargs) -> Dict:
@@ -729,14 +779,24 @@ def search():
             del user_sessions[user_id_int]
             return jsonify({'error': 'Сессия истекла'}), 403
         
-        print(f"🔍 Поиск от пользователя {user_id}: {query[:50]}...")
+        print(f"🔍 Поиск от пользователя {user_id}: {query}")
         
         # Выполняем поиск через менеджер сессий
         result = session_manager.search(query)
         
+        print(f"📊 Результат поиска: success={result.get('success')}, has_formatted={result.get('formatted') is not None}")
+        
         if result.get('success'):
-            return jsonify({'result': result.get('formatted')})
+            formatted_result = result.get('formatted')
+            if formatted_result:
+                print(f"📏 Длина отформатированного результата: {len(formatted_result)}")
+                print(f"📄 Результат: {formatted_result[:100]}...")
+                return jsonify({'result': formatted_result})
+            else:
+                print("⚠️ Отформатированный результат отсутствует")
+                return jsonify({'error': 'Нет данных в ответе'}), 500
         else:
+            print(f"❌ Ошибка поиска: {result.get('error')}")
             return jsonify({'error': result.get('error', 'Неизвестная ошибка')}), 500
         
     except Exception as e:
