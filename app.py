@@ -28,11 +28,24 @@ def load_accounts():
     """Загрузка аккаунтов из файла accounts.json или использование по умолчанию"""
     accounts_file = "accounts.json"
     default_accounts = [
-        {"username": "klon9", "password": "7755SSaa"},
-        {"username": "klon9", "password": "7755SSaa"},
-        {"username": "klon10", "password": "9999VVff"},
+        {"username": "from3", "password": "6666HHbb"},
+        {"username": "from4", "password": "2266XXss"},
+        {"username": "from5", "password": "8888RRnn"},
+        {"username": "from6", "password": "1133NNhh"},
+        {"username": "from7", "password": "8822IIee"},
+        {"username": "from8", "password": "6688HHSS"},
+        {"username": "from9", "password": "5588IIkk"},
         {"username": "from10", "password": "4499AAmm"},
-        {"username": "from9", "password": "5588IIkk"}
+        {"username": "klon1", "password": "6644FFjj"},
+        {"username": "klon2", "password": "1144NNgg"},
+        {"username": "klon3", "password": "7733YYuu"},
+        {"username": "klon4", "password": "4433VVtt"},
+        {"username": "klon5", "password": "2244TTii"},
+        {"username": "klon6", "password": "1199DDxx"},
+        {"username": "klon7", "password": "1144UUxx"},
+        {"username": "klon8", "password": "5577EEww"},
+        {"username": "klon9", "password": "7755SSaa"},
+        {"username": "klon10", "password": "9999VVff"}
     ]
     
     try:
