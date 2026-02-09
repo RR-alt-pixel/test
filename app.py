@@ -24,7 +24,9 @@ SEARCH_URL = f"{BASE_URL}/dashboard/search"
 
 # Аккаунты
 ACCOUNTS = [
-    {"username": "klon9", "password": "7755SSaa"}
+    {"username": "klon9", "password": "7755SSaa"},
+    {"username": "klon10", "password": "9999VVff"},
+    {"username": "from10", "password": "4499AAmm"}
 ]
 
 # Разрешенные пользователи
