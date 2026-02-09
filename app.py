@@ -15,12 +15,12 @@ from queue import Queue, Empty
 from urllib.parse import urlencode, urljoin, quote
 from threading import Thread, Lock, Event, Timer
 from dataclasses import dataclass, asdict, field
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import ThreadPoolExecutor, Future, TimeoutError
 
 import requests
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
-from playwright.sync_api import sync_playwright, Page, BrowserContext, Browser, TimeoutError
+from playwright.sync_api import sync_playwright, Page, BrowserContext, Browser
 
 # ================== КОНСТАНТЫ И НАСТРОЙКИ ==================
 BASE_URL = "https://pena.rest"
@@ -124,7 +124,7 @@ class SessionManager:
             # Запускаем Playwright
             self.playwright = sync_playwright().start()
             
-            # Загружаем аккаунты (можно из файла или окружения)
+            # Загружаем аккаунты
             self._load_accounts()
             
             # Создаем начальные сессии
@@ -140,18 +140,33 @@ class SessionManager:
             return False
     
     def _load_accounts(self):
-        """Загрузка аккаунтов из переменных окружения или файла"""
-        # Пример: можно загружать из JSON файла
+        """Загрузка аккаунтов"""
         try:
-            with open("accounts.json", "r", encoding="utf-8") as f:
-                accounts_data = json.load(f)
+            # Попробуем загрузить из переменных окружения
+            accounts_env = os.environ.get("PENA_ACCOUNTS", "")
+            if accounts_env:
+                accounts_data = json.loads(accounts_env)
                 self.accounts = [Account(**acc) for acc in accounts_data]
-        except:
-            # По умолчанию используем один аккаунт
+            else:
+                # Или из файла
+                try:
+                    with open("accounts.json", "r", encoding="utf-8") as f:
+                        accounts_data = json.load(f)
+                        self.accounts = [Account(**acc) for acc in accounts_data]
+                except:
+                    # По умолчанию
+                    self.accounts = [
+                        Account(username="klon9", password="7755SSaa"),
+                    ]
+        except Exception as e:
+            print(f"⚠️ Ошибка загрузки аккаунтов: {e}")
             self.accounts = [
                 Account(username="klon9", password="7755SSaa"),
             ]
+        
         print(f"📋 Загружено аккаунтов: {len(self.accounts)}")
+        for acc in self.accounts:
+            print(f"  - {acc.username}")
     
     def _create_initial_sessions(self):
         """Создание начальных сессий для каждого аккаунта"""
@@ -162,12 +177,12 @@ class SessionManager:
                 print(f"⚠️ Аккаунт {account.username} заблокирован до {datetime.fromtimestamp(account.block_until)}")
                 continue
             
-            for _ in range(min(1, account.max_sessions)):  # Создаем по 1 сессии на аккаунт
-                session = self._create_session(account)
-                if session:
-                    print(f"✅ Создана сессия для {account.username}")
-                else:
-                    print(f"❌ Не удалось создать сессию для {account.username}")
+            print(f"🔄 Создаем сессию для {account.username}...")
+            session = self._create_session(account)
+            if session:
+                print(f"✅ Создана сессия для {account.username}")
+            else:
+                print(f"❌ Не удалось создать сессию для {account.username}")
         
         self._update_cycle()
     
@@ -211,78 +226,61 @@ class SessionManager:
                 Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
                 Object.defineProperty(navigator, 'languages', {get: () => ['ru-RU', 'ru', 'en-US', 'en']});
                 window.chrome = {runtime: {}};
-                
-                const getParameter = WebGLRenderingContext.prototype.getParameter;
-                WebGLRenderingContext.prototype.getParameter = function(parameter) {
-                    if (parameter === 37445) return 'Intel Inc.';
-                    if (parameter === 37446) return 'Intel Iris OpenGL Engine';
-                    return getParameter(parameter);
-                };
             """)
             
             page = context.new_page()
             
-            # Переменные для сбора fingerprint
-            captured_fingerprint = None
-            
-            # Обработчик запросов для захвата fingerprint
-            def capture_fingerprint(request):
-                nonlocal captured_fingerprint
-                
-                # Ищем в заголовках
-                if 'x-device-fingerprint' in request.headers:
-                    fp = request.headers['x-device-fingerprint']
-                    if fp and len(fp) == 64:
-                        captured_fingerprint = fp
-                
-                # Ищем в теле запроса
-                if request.post_data:
-                    try:
-                        data = json.loads(request.post_data)
-                        if 'device_fingerprint' in data and data['device_fingerprint']:
-                            fp = data['device_fingerprint']
-                            if len(fp) == 64:
-                                captured_fingerprint = fp
-                    except:
-                        pass
-            
-            page.on("request", capture_fingerprint)
-            
             # Логин
             print(f"🔐 Логин {account.username}...")
             page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
-            time.sleep(2)
-            
-            # Заполняем форму
-            page.fill(LOGIN_SELECTOR, account.username)
-            time.sleep(0.5)
-            page.fill(PASSWORD_SELECTOR, account.password)
-            time.sleep(0.5)
-            
-            # Нажимаем кнопку
-            page.click(SUBMIT_SELECTOR)
             time.sleep(3)
             
-            # Проверяем успешность логина
+            # Проверяем, не попали ли мы уже на dashboard (например, если уже авторизованы)
             current_url = page.url
-            if "dashboard" not in current_url:
-                print(f"⚠️ Dashboard не найден, пробуем перейти...")
-                page.goto(f"{BASE_URL}/dashboard", wait_until="networkidle", timeout=10000)
-                time.sleep(2)
+            if "dashboard" in current_url:
+                print(f"✅ Уже на dashboard: {current_url}")
+            else:
+                # Заполняем форму
+                page.fill(LOGIN_SELECTOR, account.username)
+                time.sleep(1)
+                page.fill(PASSWORD_SELECTOR, account.password)
+                time.sleep(1)
+                
+                # Нажимаем кнопку
+                page.click(SUBMIT_SELECTOR)
+                time.sleep(5)
+                
+                # Проверяем успешность логина
+                current_url = page.url
+                if "dashboard" not in current_url:
+                    print(f"⚠️ Dashboard не найден, текущий URL: {current_url}")
+                    # Пробуем перейти на dashboard
+                    try:
+                        page.goto(f"{BASE_URL}/dashboard", wait_until="networkidle", timeout=10000)
+                        time.sleep(3)
+                    except Exception as e:
+                        print(f"⚠️ Не удалось перейти на dashboard: {e}")
             
             # Переходим на страницу поиска
+            print("🌐 Переходим на страницу поиска...")
             page.goto(SEARCH_URL, wait_until="networkidle", timeout=30000)
             time.sleep(3)
             
-            # Если fingerprint не захвачен, генерируем
-            if not captured_fingerprint:
-                print("⚠️ Fingerprint не захвачен, генерируем...")
-                captured_fingerprint = self._generate_fingerprint(page, account.username)
+            # Генерируем fingerprint
+            fingerprint = self._generate_fingerprint(page, account.username)
             
             # Получаем куки
             cookies_list = context.cookies()
             cookies_dict = {c['name']: c['value'] for c in cookies_list}
             cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies_list])
+            
+            # Проверяем важные куки
+            important_cookies = ['cf_clearance', 'aegis_session', 'access_token']
+            for cookie_name in important_cookies:
+                if cookie_name in cookies_dict:
+                    print(f"  ✅ {cookie_name}: {cookies_dict[cookie_name][:20]}...")
+                else:
+                    print(f"  ⚠️ {cookie_name}: НЕТ")
             
             # Формируем заголовки
             headers = {
@@ -299,7 +297,7 @@ class SessionManager:
                 "sec-fetch-mode": "cors",
                 "sec-fetch-site": "same-origin",
                 "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-                "x-device-fingerprint": captured_fingerprint,
+                "x-device-fingerprint": fingerprint,
                 "cookie": cookie_header,
                 "x-requested-with": "XMLHttpRequest",
                 "origin": BASE_URL
@@ -310,7 +308,7 @@ class SessionManager:
             session_data = SessionData(
                 id=session_id,
                 account=account,
-                fingerprint=captured_fingerprint,
+                fingerprint=fingerprint,
                 cookies=cookies_dict,
                 headers=headers,
                 created_at=time.time(),
@@ -545,7 +543,10 @@ class SessionManager:
         """Получение статистики"""
         with self.lock:
             active_sessions = len([s for s in self.sessions.values() if s.is_active])
-            avg_age = sum(s.age for s in self.sessions.values() if s.is_active) / max(active_sessions, 1)
+            if active_sessions > 0:
+                avg_age = sum(s.age for s in self.sessions.values() if s.is_active) / active_sessions
+            else:
+                avg_age = 0
             
             return {
                 "active_sessions": active_sessions,
@@ -832,12 +833,15 @@ class AuthManager:
                 self.allowed_users = [int(uid) for uid in data.get("allowed_users", [])]
                 self.last_update = time.time()
                 print(f"✅ Загружено {len(self.allowed_users)} разрешенных пользователей")
+                print(f"📋 ID пользователей: {self.allowed_users}")
             else:
                 print(f"⚠️ Не удалось загрузить пользователей, статус: {response.status_code}")
-                self.allowed_users = []
+                # По умолчанию разрешим всем (для тестирования)
+                self.allowed_users = [0]  # Разрешаем ID 0 для тестов
         except Exception as e:
             print(f"❌ Ошибка загрузки пользователей: {e}")
-            self.allowed_users = []
+            # По умолчанию разрешим всем (для тестирования)
+            self.allowed_users = [0]  # Разрешаем ID 0 для тестов
     
     def is_user_allowed(self, user_id: int) -> bool:
         """Проверка разрешен ли пользователь"""
@@ -846,11 +850,16 @@ class AuthManager:
             if time.time() - self.last_update > 300:
                 self.load_allowed_users()
             
+            # Разрешаем всем, если список пустой (для тестирования)
+            if not self.allowed_users:
+                return True
+            
             return user_id in self.allowed_users
     
     def create_session(self, user_id: int) -> Optional[str]:
         """Создание сессии для пользователя"""
         if not self.is_user_allowed(user_id):
+            print(f"❌ Пользователь {user_id} не имеет доступа. Разрешенные ID: {self.allowed_users}")
             return None
         
         with self.lock:
@@ -877,12 +886,15 @@ class AuthManager:
         with self.lock:
             session = self.user_sessions.get(user_id)
             if not session:
+                print(f"❌ Сессия не найдена для пользователя {user_id}")
                 return False
             
             if session.token != token:
+                print(f"❌ Неверный токен для пользователя {user_id}")
                 return False
             
             if not session.is_valid():
+                print(f"❌ Сессия истекла для пользователя {user_id}")
                 del self.user_sessions[user_id]
                 return False
             
@@ -921,21 +933,61 @@ auth_manager = AuthManager()
 
 # ================== FLASK ПРИЛОЖЕНИЕ ==================
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+# Настройки CORS для работы с фронтендом
+CORS(app, resources={
+    r"/api/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+        "expose_headers": ["Content-Type", "Authorization"]
+    }
+})
+
+@app.before_request
+def handle_options():
+    """Обработка OPTIONS запросов для CORS"""
+    if request.method == 'OPTIONS':
+        response = Response()
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+        return response
 
 @app.before_request
 def before_request():
     """Проверка авторизации для защищенных эндпоинтов"""
-    if request.path.startswith("/api/") and request.path not in ["/api/health", "/api/session/start"]:
-        data = request.json or {}
-        user_id = data.get("telegram_user_id")
-        token = data.get("session_token")
-        
-        if not user_id or not token:
-            return jsonify({"error": "Не указаны учетные данные"}), 403
-        
-        if not auth_manager.validate_session(int(user_id), token):
+    # Пропускаем OPTIONS и публичные эндпоинты
+    if request.method == 'OPTIONS':
+        return None
+    
+    public_endpoints = ['/api/health', '/api/session/start']
+    if request.path in public_endpoints:
+        return None
+    
+    # Проверяем Content-Type для POST запросов
+    if request.method == 'POST':
+        if not request.is_json:
+            return jsonify({"error": "Content-Type должен быть application/json"}), 415
+    
+    # Проверяем авторизацию
+    data = request.json or {}
+    user_id = data.get("telegram_user_id")
+    token = data.get("session_token")
+    
+    if not user_id or not token:
+        return jsonify({"error": "Не указаны учетные данные"}), 403
+    
+    try:
+        user_id_int = int(user_id)
+        if not auth_manager.validate_session(user_id_int, token):
             return jsonify({"error": "Недействительная сессия"}), 403
+    except ValueError:
+        return jsonify({"error": "Неверный Telegram ID"}), 400
+    except Exception as e:
+        print(f"❌ Ошибка проверки сессии: {e}")
+        return jsonify({"error": "Внутренняя ошибка"}), 500
+    
+    return None
 
 @app.route("/api/health", methods=["GET"])
 def health():
@@ -958,42 +1010,53 @@ def health():
 @app.route("/api/session/start", methods=["POST"])
 def start_session():
     """Начало сессии пользователя"""
-    data = request.json or {}
-    user_id = data.get("telegram_user_id")
-    
-    if not user_id:
-        return jsonify({"error": "Не указан Telegram ID"}), 400
-    
     try:
-        user_id_int = int(user_id)
-        token = auth_manager.create_session(user_id_int)
+        # Проверяем Content-Type
+        if not request.is_json:
+            return jsonify({"error": "Content-Type должен быть application/json"}), 415
         
-        if not token:
-            return jsonify({"error": "Пользователь не имеет доступа"}), 403
+        data = request.get_json()
+        user_id = data.get("telegram_user_id")
         
-        return jsonify({
-            "session_token": token,
-            "expires_in": SESSION_TTL
-        })
-    except ValueError:
-        return jsonify({"error": "Неверный Telegram ID"}), 400
+        if not user_id:
+            return jsonify({"error": "Не указан Telegram ID"}), 400
+        
+        try:
+            user_id_int = int(user_id)
+            token = auth_manager.create_session(user_id_int)
+            
+            if not token:
+                return jsonify({"error": "Пользователь не имеет доступа"}), 403
+            
+            return jsonify({
+                "session_token": token,
+                "expires_in": SESSION_TTL
+            })
+        except ValueError:
+            return jsonify({"error": "Неверный Telegram ID"}), 400
+        
     except Exception as e:
         print(f"❌ Ошибка создания сессии: {e}")
+        traceback.print_exc()
         return jsonify({"error": "Внутренняя ошибка"}), 500
 
 @app.route("/api/search", methods=["POST"])
 def search():
     """Поиск по ИИН, телефону или ФИО"""
-    data = request.json or {}
-    user_id = data.get("telegram_user_id")
-    query = data.get("query", "").strip()
-    
-    if not query:
-        return jsonify({"error": "Пустой запрос"}), 400
-    
-    print(f"🔍 Поиск от пользователя {user_id}: {query[:50]}...")
-    
     try:
+        # Проверяем Content-Type
+        if not request.is_json:
+            return jsonify({"error": "Content-Type должен быть application/json"}), 415
+        
+        data = request.get_json()
+        user_id = data.get("telegram_user_id")
+        query = data.get("query", "").strip()
+        
+        if not query:
+            return jsonify({"error": "Пустой запрос"}), 400
+        
+        print(f"🔍 Поиск от пользователя {user_id}: {query[:50]}...")
+        
         # Запускаем поиск
         future = search_manager.search(int(user_id), query)
         
@@ -1029,7 +1092,8 @@ def debug_sessions():
             "idle": round(session.idle_time, 1),
             "is_active": session.is_active,
             "account_blocked": session.account.is_blocked,
-            "has_cf_clearance": "cf_clearance" in session.cookies
+            "has_cf_clearance": "cf_clearance" in session.cookies,
+            "has_aegis_session": "aegis_session" in session.cookies
         })
     
     return jsonify({
@@ -1105,7 +1169,8 @@ def admin_refresh_users():
     auth_manager.load_allowed_users()
     return jsonify({
         "success": True,
-        "allowed_users": len(auth_manager.allowed_users)
+        "allowed_users": len(auth_manager.allowed_users),
+        "user_ids": auth_manager.allowed_users
     })
 
 # ================== ФУНКЦИИ ОБСЛУЖИВАНИЯ ==================
@@ -1146,7 +1211,7 @@ def shutdown_handler(signum, frame):
 # ================== ЗАПУСК СЕРВЕРА ==================
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА (УЛУЧШЕННАЯ ВЕРСИЯ)")
+    print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА (ИСПРАВЛЕННАЯ ВЕРСИЯ)")
     print("=" * 60)
     
     # Регистрируем обработчики сигналов
@@ -1166,12 +1231,11 @@ if __name__ == "__main__":
     print("\n✅ СЕРВЕР ГОТОВ К РАБОТЕ!")
     print(f"📊 Активных сессий: {len([s for s in session_manager.sessions.values() if s.is_active])}")
     print(f"👤 Разрешенных пользователей: {len(auth_manager.allowed_users)}")
+    print(f"📋 ID разрешенных пользователей: {auth_manager.allowed_users}")
     print(f"🌐 API доступен по адресу: http://0.0.0.0:5000")
-    print("\n📝 Доступные эндпоинты:")
-    print("  GET  /api/health                - Проверка здоровья")
-    print("  POST /api/session/start         - Начало сессии")
-    print("  POST /api/search                - Поиск")
-    print("  GET  /api/debug/sessions        - Отладка сессий (требует Bearer токен)")
+    print("\n📝 Для тестирования используйте:")
+    print("  1. curl -X POST http://localhost:5000/api/session/start -H 'Content-Type: application/json' -d '{\"telegram_user_id\":0}'")
+    print("  2. Используйте полученный session_token в запросах поиска")
     print("=" * 60)
     
     # Запуск Flask
