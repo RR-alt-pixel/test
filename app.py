@@ -1,4 +1,4 @@
-# server_fixed_secure.py (с поддержкой множества аккаунтов и системой безопасности)
+# -*- coding: utf-8 -*-
 import os
 import time
 import json
@@ -12,10 +12,9 @@ from datetime import datetime
 from urllib.parse import urljoin, quote, urlencode
 from typing import Optional, Dict, List, Any, Tuple
 from collections import defaultdict
-from dataclasses import dataclass
 
 import requests
-from flask import Flask, request, jsonify, Response, g
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from playwright.sync_api import sync_playwright, TimeoutError, Browser, BrowserContext, Page
 
@@ -25,12 +24,7 @@ LOGIN_URL = f"{BASE_URL}/auth/login"
 SEARCH_URL = f"{BASE_URL}/dashboard/search"
 SECRET_TOKEN = "Refresh-Server-Key-2025-Oct-VK44"
 
-# Настройки безопасности для телеграм-пользователей
-USER_SESSION_TTL = 3600  # 1 час для телеграм сессий
-USER_SESSION_CLEANUP_INTERVAL = 300  # 5 минут очистки
-MAX_SESSIONS_PER_USER = 1  # Одна сессия на телеграм-пользователя
-
-# Загрузка аккаунтов
+# ================== ЗАГРУЗКА АККАУНТОВ ==================
 def load_accounts():
     """Загрузка аккаунтов из файла accounts.json или использование по умолчанию"""
     accounts_file = "accounts.json"
@@ -62,7 +56,6 @@ def load_accounts():
                 print(f"✅ Загружено {len(accounts)} аккаунтов из файла accounts.json")
                 return accounts
         else:
-            # Создаем файл с аккаунтами по умолчанию
             with open(accounts_file, 'w', encoding='utf-8') as f:
                 json.dump(default_accounts, f, ensure_ascii=False, indent=2)
             print(f"📁 Создан файл accounts.json с {len(default_accounts)} аккаунтом(ами)")
@@ -71,159 +64,37 @@ def load_accounts():
         print(f"❌ Ошибка загрузки аккаунтов: {e}")
         return default_accounts
 
-# Загружаем аккаунты
 ACCOUNTS = load_accounts()
+
+# ================== СИСТЕМА СЕССИЙ ДЛЯ ТЕЛЕГРАМ-ПОЛЬЗОВАТЕЛЕЙ ==================
+# Словарь для хранения сессий: user_id -> session_data
+user_sessions = {}
+user_sessions_lock = threading.Lock()
 
 # Разрешенные пользователи
 ALLOWED_USERS_URL = "https://raw.githubusercontent.com/RR-alt-pixel/test/refs/heads/main/allowed_ids.json"
 ALLOWED_USER_IDS = []
 
-# ================== СИСТЕМА БЕЗОПАСНОСТИ ДЛЯ ТЕЛЕГРАМ-ПОЛЬЗОВАТЕЛЕЙ ==================
-@dataclass
-class TelegramUserSession:
-    """Класс для хранения сессии телеграм-пользователя"""
-    user_id: int
-    session_token: str
-    created_at: float
-    last_activity: float
-    ip_address: str
-    user_agent: str
-    device_fingerprint: str
-    
-    def is_expired(self) -> bool:
-        """Проверяет, истекла ли сессия"""
-        return time.time() - self.last_activity > USER_SESSION_TTL
-    
-    def update_activity(self):
-        """Обновляет время последней активности"""
-        self.last_activity = time.time()
-
-class TelegramSessionManager:
-    """Менеджер сессий телеграм-пользователей с ограничением 1 сессия на пользователя"""
-    
-    def __init__(self):
-        self.sessions: Dict[int, TelegramUserSession] = {}  # user_id -> TelegramUserSession
-        self.token_to_user: Dict[str, int] = {}  # token -> user_id
-        self.lock = threading.Lock()
-        
-    def create_session(self, user_id: int, ip: str, user_agent: str, 
-                      device_fingerprint: str = "") -> Optional[str]:
-        """Создает новую сессию, удаляя старую если есть"""
-        with self.lock:
-            # Удаляем старую сессию если существует
-            if user_id in self.sessions:
-                old_session = self.sessions[user_id]
-                if old_session.session_token in self.token_to_user:
-                    del self.token_to_user[old_session.session_token]
-                del self.sessions[user_id]
-                print(f"[SECURITY] 🗑️ Удалена старая сессия пользователя {user_id}")
-            
-            # Создаем новую сессию
-            session_token = self._generate_token(user_id)
-            session = TelegramUserSession(
-                user_id=user_id,
-                session_token=session_token,
-                created_at=time.time(),
-                last_activity=time.time(),
-                ip_address=ip,
-                user_agent=user_agent,
-                device_fingerprint=device_fingerprint
-            )
-            
-            self.sessions[user_id] = session
-            self.token_to_user[session_token] = user_id
-            
-            print(f"[SECURITY] ✅ Создана сессия для {user_id} с IP {ip}")
-            return session_token
-    
-    def validate_session(self, session_token: str, user_id: int, 
-                        ip: str = "", user_agent: str = "") -> Tuple[bool, str]:
-        """Проверяет валидность сессии"""
-        with self.lock:
-            # Проверяем существует ли токен
-            if session_token not in self.token_to_user:
-                return False, "Недействительный токен сессии"
-            
-            # Проверяем принадлежность токена пользователю
-            token_user_id = self.token_to_user[session_token]
-            if token_user_id != user_id:
-                return False, "Токен не принадлежит пользователю"
-            
-            # Проверяем существует ли сессия
-            if user_id not in self.sessions:
-                return False, "Сессия не найдена"
-            
-            session = self.sessions[user_id]
-            
-            # Проверяем совпадение токена
-            if session.session_token != session_token:
-                return False, "Неверный токен сессии"
-            
-            # Проверяем не истекла ли сессия
-            if session.is_expired():
-                self._remove_session(user_id)
-                return False, "Сессия истекла"
-            
-            # Проверяем IP (опционально)
-            if ip and session.ip_address != ip:
-                print(f"[SECURITY] ⚠️ Изменение IP для {user_id}: {session.ip_address} -> {ip}")
-            
-            # Обновляем активность
-            session.update_activity()
-            
-            return True, "Сессия валидна"
-    
-    def get_session(self, user_id: int) -> Optional[TelegramUserSession]:
-        """Получает сессию пользователя"""
-        with self.lock:
-            return self.sessions.get(user_id)
-    
-    def remove_session(self, user_id: int):
-        """Удаляет сессию пользователя"""
-        with self.lock:
-            self._remove_session(user_id)
-    
-    def _remove_session(self, user_id: int):
-        """Внутренний метод удаления сессии"""
-        if user_id in self.sessions:
-            session = self.sessions[user_id]
-            if session.session_token in self.token_to_user:
-                del self.token_to_user[session.session_token]
-            del self.sessions[user_id]
-            print(f"[SECURITY] 🗑️ Сессия пользователя {user_id} удалена")
-    
-    def cleanup_expired_sessions(self):
-        """Очищает просроченные сессии"""
-        with self.lock:
-            expired_users = []
-            for user_id, session in self.sessions.items():
-                if session.is_expired():
-                    expired_users.append(user_id)
-            
-            for user_id in expired_users:
-                self._remove_session(user_id)
-            
-            if expired_users:
-                print(f"[SECURITY] 🧹 Удалено {len(expired_users)} просроченных сессий")
-    
-    def get_active_sessions_count(self) -> int:
-        """Возвращает количество активных сессий"""
-        with self.lock:
-            return len(self.sessions)
-    
-    def _generate_token(self, user_id: int) -> str:
-        """Генерирует уникальный токен сессии"""
-        salt = os.urandom(16).hex()
-        timestamp = str(time.time())
-        data = f"{user_id}{salt}{timestamp}"
-        return hashlib.sha256(data.encode()).hexdigest()
-
-# Инициализация менеджера сессий для телеграм-пользователей
-telegram_session_manager = TelegramSessionManager()
+def load_allowed_users():
+    """Загрузка разрешенных пользователей"""
+    global ALLOWED_USER_IDS
+    try:
+        print(f"🔐 Загрузка разрешенных пользователей...")
+        response = requests.get(ALLOWED_USERS_URL, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            ALLOWED_USER_IDS = [int(uid) for uid in data.get("allowed_users", [])]
+            print(f"✅ Загружено {len(ALLOWED_USER_IDS)} пользователей")
+        else:
+            print(f"⚠️ Не удалось загрузить пользователей")
+            ALLOWED_USER_IDS = []
+    except Exception as e:
+        print(f"❌ Ошибка загрузки пользователей: {e}")
+        ALLOWED_USER_IDS = []
 
 # ================== КЛАСС СЕССИИ PLAYWRIGHT ==================
 class PenaSession:
-    """Сессия Playwright для работы с pena.rest (работает в своем потоке)"""
+    """Сессия Playwright для работы с pena.rest"""
     
     def __init__(self, account: Dict, session_id: int):
         self.account = account
@@ -242,25 +113,21 @@ class PenaSession:
         self.error_count = 0
         self.captured_fingerprints = []
         
-        # Очередь задач для этого потока
         self.task_queue = queue.Queue()
         self.result_queue = queue.Queue()
         self.stop_event = threading.Event()
         
-        # Запускаем поток для этой сессии
         self.thread = threading.Thread(target=self._run_worker, daemon=True, name=f"Session-{session_id}")
         self.thread.start()
     
     def _run_worker(self):
-        """Главный рабочий поток сессии (ВСЕ операции с Playwright здесь)"""
+        """Главный рабочий поток сессии"""
         thread_name = threading.current_thread().name
         print(f"🔧 Запущен рабочий поток {thread_name} для {self.account['username']}")
         
         try:
-            # Инициализируем Playwright в этом потоке
             self.playwright = sync_playwright().start()
             
-            # Запускаем браузер
             self.browser = self.playwright.chromium.launch(
                 headless=True,
                 args=[
@@ -275,7 +142,6 @@ class PenaSession:
                 timeout=60000
             )
             
-            # Создаем контекст
             self.context = self.browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
                 viewport={"width": 1920, "height": 1080},
@@ -284,7 +150,6 @@ class PenaSession:
                 ignore_https_errors=True,
             )
             
-            # Маскировка Playwright
             self.context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                 Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
@@ -294,7 +159,6 @@ class PenaSession:
             
             self.page = self.context.new_page()
             
-            # Логинимся
             if self._login():
                 self.is_active = True
                 print(f"✅ Сессия {self.account['username']} (ID: {self.session_id}) активна")
@@ -302,16 +166,13 @@ class PenaSession:
                 print(f"❌ Не удалось войти для {self.account['username']} (ID: {self.session_id})")
                 return
             
-            # Основной цикл обработки задач
             while not self.stop_event.is_set():
                 try:
-                    # Получаем задачу из очереди
                     task_id, method_name, args, kwargs = self.task_queue.get(timeout=1)
                     
                     if method_name == "stop":
                         break
                     
-                    # Выполняем метод
                     try:
                         if hasattr(self, method_name):
                             self.is_busy = True
@@ -340,15 +201,13 @@ class PenaSession:
             self._cleanup()
     
     def _login(self) -> bool:
-        """Логин на сайт (выполняется в рабочем потоке)"""
+        """Логин на сайт"""
         max_attempts = 3
         for attempt in range(max_attempts):
             try:
                 print(f"🔐 Попытка {attempt + 1}/{max_attempts} логина для {self.account['username']}...")
                 
-                # Настраиваем перехватчик запросов для сбора fingerprint
                 def extract_fingerprint(request):
-                    # Ищем в заголовках
                     if 'x-device-fingerprint' in request.headers:
                         fp = request.headers['x-device-fingerprint']
                         if fp and len(fp) == 64 and fp not in self.captured_fingerprints:
@@ -356,7 +215,6 @@ class PenaSession:
                             print(f"[{self.account['username']}] Найден fingerprint: {fp[:30]}...")
                             self.fingerprint = fp
                     
-                    # Ищем в теле запроса
                     if request.post_data:
                         try:
                             data = json.loads(request.post_data)
@@ -371,45 +229,37 @@ class PenaSession:
                 
                 self.page.on("request", extract_fingerprint)
                 
-                # Переходим на страницу логина
                 self.page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
                 time.sleep(2)
                 
-                # Заполняем форму
                 self.page.fill('input[placeholder="Логин"]', self.account['username'])
                 time.sleep(0.5)
                 self.page.fill('input[placeholder="Пароль"]', self.account['password'])
                 time.sleep(0.5)
                 
-                # Нажимаем кнопку
                 self.page.click('button[type="submit"]')
                 time.sleep(3)
                 
-                # Проверяем успешность
                 current_url = self.page.url
                 if "dashboard" not in current_url:
                     print(f"⚠️ Dashboard не найден, пробуем перейти...")
                     self.page.goto(f"{BASE_URL}/dashboard", wait_until="networkidle", timeout=10000)
                     time.sleep(2)
                 
-                # Переходим на страницу поиска
                 print(f"🌐 Переходим на страницу поиска...")
                 self.page.goto(SEARCH_URL, wait_until="networkidle", timeout=30000)
                 time.sleep(3)
                 
-                # Если fingerprint не извлечен, генерируем
                 if not self.fingerprint and self.captured_fingerprints:
                     self.fingerprint = self.captured_fingerprints[0]
                 elif not self.fingerprint:
                     print(f"⚠️ Fingerprint не извлечен, генерируем...")
                     self.fingerprint = self._generate_fingerprint()
                 
-                # Получаем куки
                 cookies_list = self.context.cookies()
                 self.cookies = {c['name']: c['value'] for c in cookies_list}
                 cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies_list])
                 
-                # Формируем заголовки
                 self.headers = {
                     "accept": "application/json",
                     "accept-encoding": "gzip, deflate, br, zstd",
@@ -439,13 +289,13 @@ class PenaSession:
             except Exception as e:
                 print(f"❌ Ошибка логина для {self.account['username']} (попытка {attempt + 1}): {e}")
                 if attempt < max_attempts - 1:
-                    time.sleep(5)  # Пауза перед следующей попыткой
+                    time.sleep(5)
                 continue
         
         return False
     
     def _generate_fingerprint(self) -> str:
-        """Генерация fingerprint (резервный метод)"""
+        """Генерация fingerprint"""
         try:
             browser_data = self.page.evaluate("""
                 () => {
@@ -473,11 +323,10 @@ class PenaSession:
             return hashlib.sha256(data_str.encode()).hexdigest()
     
     def search(self, query: str) -> Dict:
-        """Поиск по запросу (выполняется в рабочем потоке)"""
+        """Поиск по запросу"""
         self.last_used = time.time()
         
         try:
-            # Определяем тип поиска
             if query.isdigit() and len(query) == 12:
                 print(f"🔍 Поиск по ИИН: {query} (сессия {self.session_id})")
                 return self._search_iin(query)
@@ -506,7 +355,6 @@ class PenaSession:
             if response.status == 200:
                 data = response.json()
                 
-                # Логируем полученные данные для отладки
                 print(f"📊 Получены данные от pena.rest (сессия {self.session_id}): {json.dumps(data, ensure_ascii=False)[:200]}...")
                 
                 if not isinstance(data, list) or not data:
@@ -515,7 +363,6 @@ class PenaSession:
                 else:
                     results = []
                     for i, p in enumerate(data[:5], 1):
-                        # Проверяем, что p - это словарь
                         if isinstance(p, dict):
                             result = f"{i}. 🧾 <b>ИИН: {p.get('iin', 'Нет')}</b>"
                             if p.get('snf'):
@@ -524,7 +371,6 @@ class PenaSession:
                                 result += f"\n   📱 {p.get('phone_number', '')}"
                             if p.get('birthday'):
                                 result += f"\n   📅 {p.get('birthday', '')}"
-                            # Добавляем дополнительную информацию, если есть
                             if p.get('address'):
                                 result += f"\n   🏠 {p.get('address', '')}"
                             if p.get('nationality'):
@@ -572,7 +418,6 @@ class PenaSession:
     def _search_phone(self, phone: str) -> Dict:
         """Поиск по телефону"""
         try:
-            # Очищаем номер
             clean = ''.join(filter(str.isdigit, phone))
             if clean.startswith("8"):
                 clean = "7" + clean[1:]
@@ -639,7 +484,6 @@ class PenaSession:
     def _search_fio(self, text: str) -> Dict:
         """Поиск по ФИО"""
         try:
-            # Определяем параметры поиска
             if text.startswith(",,"):
                 parts = text[2:].strip().split()
                 if len(parts) < 2:
@@ -732,19 +576,15 @@ class PenaSession:
         """Добавление задачи в очередь и ожидание результата"""
         task_id = f"{self.account['username']}_{self.session_id}_{int(time.time())}_{random.randint(1000, 9999)}"
         
-        # Добавляем задачу в очередь
         self.task_queue.put((task_id, method_name, args, kwargs))
         
-        # Ждем результат
         start_time = time.time()
-        while time.time() - start_time < 30:  # Таймаут 30 секунд
+        while time.time() - start_time < 30:
             try:
-                # Проверяем очередь результатов
                 result_id, result = self.result_queue.get(timeout=0.1)
                 if result_id == task_id:
                     return result
                 else:
-                    # Не наш результат, кладем обратно
                     self.result_queue.put((result_id, result))
             except queue.Empty:
                 continue
@@ -776,16 +616,16 @@ class PenaSession:
 
 # ================== МЕНЕДЖЕР СЕССИЙ PLAYWRIGHT ==================
 class PenaSessionManager:
-    """Управление сессиями Playwright с балансировкой нагрузки"""
+    """Управление сессиями Playwright"""
     
     def __init__(self):
         self.sessions: List[PenaSession] = []
         self.session_counter = 0
         self.lock = threading.Lock()
-        self.cache = {}  # Простой кэш результатов
+        self.cache = {}
         self.cache_lock = threading.Lock()
-        self.request_counter = defaultdict(int)  # Счетчик запросов по сессиям
-        self.failed_sessions = set()  # ID неработающих сессий
+        self.request_counter = defaultdict(int)
+        self.failed_sessions = set()
         
     def initialize(self) -> bool:
         """Инициализация сессий для всех аккаунтов"""
@@ -798,8 +638,7 @@ class PenaSessionManager:
             self.sessions.append(session)
             self.session_counter += 1
             
-            # Ждем пока сессия станет активной
-            for attempt in range(30):  # 30 попыток по 1 секунде
+            for attempt in range(30):
                 if session.is_active:
                     print(f"✅ Сессия {account['username']} (ID: {session_id}) активна")
                     break
@@ -811,7 +650,6 @@ class PenaSessionManager:
         active_sessions = len([s for s in self.sessions if s.is_active])
         print(f"✅ Активных сессий: {active_sessions} из {len(self.sessions)}")
         
-        # Запускаем мониторинг сессий в отдельном потоке
         if active_sessions > 0:
             monitor_thread = threading.Thread(target=self._monitor_sessions, daemon=True)
             monitor_thread.start()
@@ -822,52 +660,45 @@ class PenaSessionManager:
     def _monitor_sessions(self):
         """Мониторинг состояния сессий"""
         while True:
-            time.sleep(60)  # Проверка каждую минуту
+            time.sleep(60)
             with self.lock:
                 active_count = 0
                 for session in self.sessions:
                     if session.is_active:
                         active_count += 1
-                        # Если сессия долго не использовалась (более 10 минут), обновим ее
                         if time.time() - session.last_used > 600 and not session.is_busy:
                             print(f"🔄 Сессия {session.account['username']} (ID: {session.session_id}) долго не использовалась, проверка...")
                 
                 print(f"📊 Мониторинг: {active_count} активных сессий из {len(self.sessions)}")
     
     def get_best_session(self) -> Optional[PenaSession]:
-        """Выбор лучшей сессии для запроса (наименее загруженная)"""
+        """Выбор лучшей сессии для запроса"""
         with self.lock:
-            # Фильтруем активные и не занятые сессии
             available_sessions = [s for s in self.sessions 
                                  if s.is_active and not s.is_busy and s.session_id not in self.failed_sessions]
             
             if not available_sessions:
-                # Если нет доступных сессий, пробуем использовать любую активную
                 available_sessions = [s for s in self.sessions if s.is_active]
             
             if not available_sessions:
                 return None
             
-            # Выбираем сессию с наименьшим количеством запросов
             available_sessions.sort(key=lambda s: s.request_count)
             return available_sessions[0]
     
     def search(self, query: str) -> Dict:
-        """Поиск с использованием кэша и балансировкой нагрузки"""
-        # Проверяем кэш
+        """Поиск с использованием кэша"""
         cache_key = query.lower().strip()
         with self.cache_lock:
             if cache_key in self.cache:
                 cached = self.cache[cache_key]
-                if time.time() - cached["timestamp"] < 300:  # 5 минут кэш
+                if time.time() - cached["timestamp"] < 300:
                     print(f"📦 Использован кэш для: {query}")
                     return cached["result"]
         
-        # Получаем лучшую сессию для запроса
         session = self.get_best_session()
         
         if not session:
-            # Если нет активных сессий, проверяем кэш еще раз
             with self.cache_lock:
                 if cache_key in self.cache:
                     cached = self.cache[cache_key]
@@ -877,14 +708,11 @@ class PenaSessionManager:
         
         print(f"🔄 Используем сессию {session.account['username']} (ID: {session.session_id}, запросов: {session.request_count}) для запроса: {query}")
         
-        # Выполняем поиск
         task_result = session.execute_task("search", query)
         
-        # Если execute_task вернул {"success": True, "result": actual_result}
         if task_result.get('success'):
             actual_result = task_result.get('result')
             
-            # Сохраняем в кэш при успехе
             if actual_result and actual_result.get("success"):
                 with self.cache_lock:
                     self.cache[cache_key] = {
@@ -896,11 +724,9 @@ class PenaSessionManager:
             
             return actual_result
         else:
-            # Если ошибка, помечаем сессию как проблемную
             self.failed_sessions.add(session.session_id)
             print(f"⚠️ Сессия {session.session_id} помечена как проблемная из-за ошибки: {task_result.get('error')}")
             
-            # Пробуем другую сессию
             return {"success": False, "error": task_result.get('error', 'Ошибка выполнения задачи')}
     
     def get_status(self) -> Dict:
@@ -949,8 +775,6 @@ class PenaSessionManager:
                     session = self.sessions[session_id]
                     if not session.is_active:
                         print(f"🔄 Перезапуск сессии {session_id}...")
-                        # Здесь можно добавить логику перезапуска
-                        # Пока просто убираем из списка проблемных
                         self.failed_sessions.remove(session_id)
                         restarted += 1
             print(f"✅ Перезапущено {restarted} сессий")
@@ -960,60 +784,27 @@ app = Flask(__name__)
 CORS(app)
 
 # Глобальные объекты
-pena_session_manager = PenaSessionManager()  # Менеджер для Playwright сессий
-telegram_session_manager = TelegramSessionManager()  # Менеджер для телеграм-пользователей
+pena_session_manager = PenaSessionManager()
 
-def load_allowed_users():
-    """Загрузка разрешенных пользователей"""
-    global ALLOWED_USER_IDS
-    try:
-        print(f"🔐 Загрузка разрешенных пользователей...")
-        response = requests.get(ALLOWED_USERS_URL, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            ALLOWED_USER_IDS = [int(uid) for uid in data.get("allowed_users", [])]
-            print(f"✅ Загружено {len(ALLOWED_USER_IDS)} пользователей")
-        else:
-            print(f"⚠️ Не удалось загрузить пользователей")
-            ALLOWED_USER_IDS = []
-    except Exception as e:
-        print(f"❌ Ошибка загрузки пользователей: {e}")
-        ALLOWED_USER_IDS = []
-
-# ================== MIDDLEWARE ДЛЯ ПРОВЕРКИ СЕССИЙ ==================
-@app.before_request
-def check_telegram_session():
-    """Проверяет сессию телеграм-пользователя для защищенных маршрутов"""
-    # Исключаем публичные маршруты
-    public_routes = ['/api/health', '/api/session/start', '/api/session/status', 
-                     '/api/session/end', '/api/debug/sessions', '/api/debug/clear_cache',
-                     '/api/debug/restart_sessions', '/api/debug/accounts']
-    
-    if request.path in public_routes:
-        return
-    
-    if request.path == '/api/search' and request.method == 'POST':
-        # Проверяем сессию для поиска
-        data = request.json or {}
-        user_id = data.get('telegram_user_id')
-        session_token = data.get('session_token')
-        
-        if not user_id or not session_token:
-            return jsonify({'error': 'Требуется авторизация'}), 401
-        
-        # Генерируем отпечаток устройства
-        device_fingerprint = request.headers.get('User-Agent', '') + request.remote_addr
-        
-        # Проверяем сессию
-        is_valid, message = telegram_session_manager.validate_session(
-            session_token=session_token,
-            user_id=int(user_id),
-            ip=request.remote_addr,
-            user_agent=request.headers.get('User-Agent', '')
-        )
-        
-        if not is_valid:
-            return jsonify({'error': message}), 403
+def cleanup_user_sessions():
+    """Очистка просроченных сессий пользователей"""
+    while True:
+        try:
+            current_time = time.time()
+            expired_users = []
+            
+            with user_sessions_lock:
+                for user_id, session_data in list(user_sessions.items()):
+                    if current_time - session_data['created'] > 3600:  # 1 час
+                        expired_users.append(user_id)
+                
+                for user_id in expired_users:
+                    del user_sessions[user_id]
+                    print(f"🧹 Удалена просроченная сессия пользователя {user_id}")
+            
+            time.sleep(300)  # Проверка каждые 5 минут
+        except Exception as e:
+            print(f"❌ Ошибка очистки сессий: {e}")
 
 @app.before_request
 def before_request():
@@ -1028,7 +819,7 @@ def before_request():
 # ================== API СЕССИЙ ДЛЯ ТЕЛЕГРАМ-ПОЛЬЗОВАТЕЛЕЙ ==================
 @app.route('/api/session/start', methods=['POST'])
 def start_telegram_session():
-    """Создание сессии телеграм-пользователя"""
+    """Создание сессии телеграм-пользователя (СТАРАЯ ЛОГИКА)"""
     try:
         if not request.is_json:
             return jsonify({'error': 'Content-Type должен быть application/json'}), 415
@@ -1044,102 +835,83 @@ def start_telegram_session():
         
         user_id_int = int(user_id)
         
-        # Проверяем доступ (если есть разрешенные пользователи)
+        # Проверяем доступ
         if ALLOWED_USER_IDS and user_id_int not in ALLOWED_USER_IDS:
             print(f"❌ Пользователь {user_id_int} не имеет доступа")
             return jsonify({'error': 'Нет доступа'}), 403
         
-        # Генерируем отпечаток устройства
+        # Генерируем токен сессии (старая логика)
+        session_token = f"{user_id_int}_{int(time.time())}_{random.randint(1000, 9999)}"
+        
+        # Получаем device fingerprint
         device_fingerprint = request.headers.get('User-Agent', '') + request.remote_addr
         
-        # Создаем сессию через менеджер
-        session_token = telegram_session_manager.create_session(
-            user_id=user_id_int,
-            ip=request.remote_addr,
-            user_agent=request.headers.get('User-Agent', ''),
-            device_fingerprint=hashlib.md5(device_fingerprint.encode()).hexdigest()
-        )
+        # Сохраняем сессию (старая логика - перезаписываем существующую)
+        with user_sessions_lock:
+            # НЕ удаляем старую сессию, просто перезаписываем
+            user_sessions[user_id_int] = {
+                'token': session_token,
+                'created': time.time(),
+                'ip': request.remote_addr,
+                'user_agent': request.headers.get('User-Agent', ''),
+                'device_fingerprint': hashlib.md5(device_fingerprint.encode()).hexdigest()
+            }
         
-        if not session_token:
-            return jsonify({'error': 'Ошибка создания сессии'}), 500
-        
-        # Получаем информацию о сессии
-        session = telegram_session_manager.get_session(user_id_int)
-        
-        print(f"🔑 Создана сессия для пользователя {user_id_int}")
-        return jsonify({
-            'session_token': session_token,
-            'expires_in': USER_SESSION_TTL,
-            'created_at': datetime.fromtimestamp(session.created_at).isoformat(),
-            'message': 'Сессия активна 1 час. Вы можете использовать только одно устройство.'
-        })
+        print(f"🔑 Создана сессия для пользователя {user_id_int} с IP {request.remote_addr}")
+        return jsonify({'session_token': session_token})
         
     except Exception as e:
         print(f"❌ Ошибка создания сессии: {e}")
         traceback.print_exc()
         return jsonify({'error': 'Внутренняя ошибка'}), 500
 
-@app.route('/api/session/status', methods=['POST'])
-def telegram_session_status():
-    """Проверка статуса сессии телеграм-пользователя"""
-    data = request.json or {}
-    user_id = data.get('telegram_user_id')
-    session_token = data.get('session_token')
-    
-    if not user_id or not session_token:
-        return jsonify({'error': 'Требуется user_id и session_token'}), 400
-    
-    is_valid, message = telegram_session_manager.validate_session(
-        session_token=session_token,
-        user_id=int(user_id),
-        ip=request.remote_addr,
-        user_agent=request.headers.get('User-Agent', '')
-    )
-    
-    if not is_valid:
-        return jsonify({'valid': False, 'message': message}), 200
-    
-    session = telegram_session_manager.get_session(int(user_id))
-    
-    return jsonify({
-        'valid': True,
-        'user_id': user_id,
-        'created_at': datetime.fromtimestamp(session.created_at).isoformat(),
-        'last_activity': datetime.fromtimestamp(session.last_activity).isoformat(),
-        'expires_in': USER_SESSION_TTL - (time.time() - session.last_activity),
-        'ip': session.ip_address
-    })
-
-@app.route('/api/session/end', methods=['POST'])
-def end_telegram_session():
-    """Завершение текущей сессии телеграм-пользователя"""
-    data = request.json or {}
-    user_id = data.get('telegram_user_id')
-    
-    if not user_id:
-        return jsonify({'error': 'Нет Telegram ID'}), 400
-    
-    telegram_session_manager.remove_session(int(user_id))
-    
-    return jsonify({
-        'success': True,
-        'message': 'Сессия завершена'
-    })
-
 # ================== API ПОИСКА ==================
 @app.route('/api/search', methods=['POST'])
 def search():
-    """Поиск по ИИН, телефону или ФИО"""
+    """Поиск по ИИН, телефону или ФИО (СТАРАЯ ЛОГИКА ПРОВЕРКИ)"""
     try:
         if not request.is_json:
             return jsonify({'error': 'Content-Type должен быть application/json'}), 415
         
         data = request.get_json()
         user_id = data.get('telegram_user_id')
+        session_token = data.get('session_token')
         query = data.get('query', '').strip()
+        
+        if not user_id or not session_token:
+            return jsonify({'error': 'Не указаны учетные данные'}), 403
         
         if not query:
             return jsonify({'error': 'Пустой запрос'}), 400
+        
+        # Проверяем сессию (старая логика)
+        user_id_int = int(user_id)
+        
+        with user_sessions_lock:
+            session = user_sessions.get(user_id_int)
+        
+        if not session or session['token'] != session_token:
+            return jsonify({'error': 'Недействительная сессия'}), 403
+        
+        # Проверяем, не истекла ли сессия (1 час)
+        if time.time() - session['created'] > 3600:
+            with user_sessions_lock:
+                if user_id_int in user_sessions:
+                    del user_sessions[user_id_int]
+            return jsonify({'error': 'Сессия истекла'}), 403
+        
+        # ПРОВЕРКА УСТРОЙСТВА (НОВАЯ ФУНКЦИОНАЛЬНОСТЬ)
+        # Если устройство отличается от того, на котором была создана сессия
+        current_device_fingerprint = hashlib.md5(
+            (request.headers.get('User-Agent', '') + request.remote_addr).encode()
+        ).hexdigest()
+        
+        if session['device_fingerprint'] != current_device_fingerprint:
+            print(f"⚠️ Попытка доступа с другого устройства для пользователя {user_id_int}")
+            return jsonify({
+                'error': 'Сессия была создана на другом устройстве. Пожалуйста, войдите заново.',
+                'device_mismatch': True
+            }), 403
         
         print(f"🔍 Поиск от пользователя {user_id}: {query}")
         
@@ -1180,9 +952,40 @@ def health():
         'busy_sessions': status['busy_sessions'],
         'failed_sessions': status['failed_sessions'],
         'cache_size': status['cache_size'],
-        'telegram_sessions': telegram_session_manager.get_active_sessions_count(),
+        'telegram_sessions': len(user_sessions),
         'queue_size': 0
     })
+
+@app.route('/api/refresh-users', methods=['POST'])
+def refresh_users():
+    """Принудительное обновление списка разрешенных пользователей"""
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Требуется авторизация'}), 401
+        
+        token = auth_header.split(' ')[1]
+        if token != SECRET_TOKEN:
+            return jsonify({'error': 'Неверный токен авторизации'}), 403
+        
+        old_count = len(ALLOWED_USER_IDS)
+        load_allowed_users()
+        new_count = len(ALLOWED_USER_IDS)
+        
+        print(f"🔄 Список пользователей обновлен: {old_count} -> {new_count}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Список пользователей обновлен: {old_count} -> {new_count}',
+            'old_count': old_count,
+            'new_count': new_count,
+            'users': ALLOWED_USER_IDS
+        })
+        
+    except Exception as e:
+        print(f"❌ Ошибка обновления пользователей: {e}")
+        traceback.print_exc()
+        return jsonify({'error': 'Внутренняя ошибка'}), 500
 
 @app.route('/api/debug/sessions', methods=['GET'])
 def debug_sessions():
@@ -1194,14 +997,13 @@ def debug_sessions():
 def debug_telegram_sessions():
     """Отладочная информация о сессиях телеграм-пользователей"""
     sessions_info = []
-    for user_id, session in telegram_session_manager.sessions.items():
+    for user_id, session in user_sessions.items():
         sessions_info.append({
             'user_id': user_id,
-            'created': datetime.fromtimestamp(session.created_at).isoformat(),
-            'last_activity': datetime.fromtimestamp(session.last_activity).isoformat(),
-            'ip': session.ip_address,
-            'device_fingerprint': session.device_fingerprint[:20] + '...',
-            'expires_in': USER_SESSION_TTL - (time.time() - session.last_activity)
+            'created': datetime.fromtimestamp(session['created']).isoformat(),
+            'ip': session['ip'],
+            'device_fingerprint': session['device_fingerprint'][:20] + '...',
+            'expires_in': 3600 - (time.time() - session['created'])
         })
     
     return jsonify({
@@ -1230,52 +1032,6 @@ def debug_accounts():
         'count': len(ACCOUNTS)
     })
 
-# После других endpoints добавьте:
-
-@app.route('/api/refresh-users', methods=['POST'])
-def refresh_users():
-    """Принудительное обновление списка разрешенных пользователей"""
-    try:
-        # Проверка авторизации через Bearer токен
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return jsonify({'error': 'Требуется авторизация'}), 401
-        
-        token = auth_header.split(' ')[1]
-        if token != SECRET_TOKEN:
-            return jsonify({'error': 'Неверный токен авторизации'}), 403
-        
-        # Загружаем обновленный список пользователей
-        old_count = len(ALLOWED_USER_IDS)
-        load_allowed_users()
-        new_count = len(ALLOWED_USER_IDS)
-        
-        print(f"🔄 Список пользователей обновлен: {old_count} -> {new_count}")
-        
-        return jsonify({
-            'success': True,
-            'message': f'Список пользователей обновлен: {old_count} -> {new_count}',
-            'old_count': old_count,
-            'new_count': new_count,
-            'users': ALLOWED_USER_IDS
-        })
-        
-    except Exception as e:
-        print(f"❌ Ошибка обновления пользователей: {e}")
-        traceback.print_exc()
-        return jsonify({'error': 'Внутренняя ошибка'}), 500
-
-# ================== ФОНГОВЫЕ ЗАДАЧИ ==================
-def telegram_session_cleanup_task():
-    """Периодическая очистка просроченных сессий телеграм-пользователей"""
-    while True:
-        try:
-            telegram_session_manager.cleanup_expired_sessions()
-        except Exception as e:
-            print(f"[SESSION CLEANUP ERROR] {e}")
-        
-        time.sleep(USER_SESSION_CLEANUP_INTERVAL)
-
 # ================== ЗАПУСК ==================
 def cleanup_on_exit():
     """Очистка при выходе"""
@@ -1289,7 +1045,7 @@ if __name__ == '__main__':
     signal.signal(signal.SIGTERM, lambda s, f: cleanup_on_exit())
     
     print("\n" + "=" * 60)
-    print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА С СИСТЕМОЙ БЕЗОПАСНОСТИ")
+    print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА")
     print("=" * 60)
     
     # Загружаем разрешенных пользователей
@@ -1298,20 +1054,20 @@ if __name__ == '__main__':
     # Инициализируем сессии Playwright
     if pena_session_manager.initialize():
         # Запускаем очистку сессий телеграм-пользователей
-        cleanup_thread = threading.Thread(target=telegram_session_cleanup_task, daemon=True)
+        cleanup_thread = threading.Thread(target=cleanup_user_sessions, daemon=True)
         cleanup_thread.start()
         
         print(f"\n✅ СЕРВЕР ГОТОВ К РАБОТЕ!")
         print(f"📊 Активных сессий Playwright: {len([s for s in pena_session_manager.sessions if s.is_active])}")
         print(f"👤 Аккаунтов pena.rest: {len(ACCOUNTS)}")
         print(f"🔐 Разрешенных телеграм-пользователей: {len(ALLOWED_USER_IDS)}")
+        print(f"🔑 Всего сессий телеграм-пользователей: {len(user_sessions)}")
         print(f"🌐 API доступен по адресу: http://0.0.0.0:5000")
         print("\n📋 Доступные endpoint-ы:")
         print("  /api/health               - Проверка состояния")
         print("  /api/session/start        - Создание сессии телеграм-пользователя")
-        print("  /api/session/status       - Проверка статуса сессии")
-        print("  /api/session/end          - Завершение сессии")
         print("  /api/search               - Поиск по ИИН/телефону/ФИО")
+        print("  /api/refresh-users        - Обновление списка пользователей")
         print("  /api/debug/sessions       - Отладка сессий Playwright")
         print("  /api/debug/telegram_sessions - Отладка сессий телеграм-пользователей")
         print("  /api/debug/accounts       - Просмотр аккаунтов")
