@@ -273,49 +273,53 @@ class PenaSession:
         try:
             # Определяем тип поиска
             if query.isdigit() and len(query) == 12:
-                search_type = "iin"
+                return self._search_iin(query)
             elif query.startswith(("+", "8", "7")):
-                search_type = "phone"
+                return self._search_phone(query)
             else:
-                search_type = "fio"
-            
-            # Формируем URL
-            if search_type == "iin":
-                url = urljoin(BASE_URL, f"/api/v3/search/iin?iin={query}")
-            elif search_type == "phone":
-                clean = ''.join(filter(str.isdigit, query))
-                if clean.startswith("8"):
-                    clean = "7" + clean[1:]
-                url = urljoin(BASE_URL, f"/api/v3/search/phone?phone={clean}&limit=10")
-            elif search_type == "fio":
-                parts = query.split(" ", 2)
-                params = {}
-                if len(parts) >= 1:
-                    params["surname"] = parts[0]
-                if len(parts) >= 2:
-                    params["name"] = parts[1]
-                if len(parts) >= 3:
-                    params["father_name"] = parts[2]
-                params["smart_mode"] = "true"
-                params["limit"] = 10
-                query_string = urlencode(params)
-                url = urljoin(BASE_URL, f"/api/v3/search/fio?{query_string}")
-            
-            # Выполняем запрос
+                return self._search_fio(query)
+                
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def _search_iin(self, iin: str) -> Dict:
+        """Поиск по ИИН"""
+        try:
+            url = urljoin(BASE_URL, f"/api/v3/search/iin?iin={iin}")
             response = self.context.request.get(url, headers=self.headers, timeout=30000)
             
             if response.status == 200:
                 data = response.json()
                 
-                # Форматируем результат
-                formatted = self._format_result(data, search_type)
+                if not isinstance(data, list) or not data:
+                    formatted = "⚠️ Ничего не найдено по ИИН."
+                else:
+                    results = []
+                    for i, p in enumerate(data[:5], 1):
+                        result = f"{i}. 🧾 <b>ИИН: {p.get('iin','')}</b>"
+                        if p.get('snf'):
+                            result += f"\n   👤 {p.get('snf','')}"
+                        if p.get('phone_number'):
+                            result += f"\n   📱 {p.get('phone_number','')}"
+                        if p.get('birthday'):
+                            result += f"\n   📅 {p.get('birthday','')}"
+                        results.append(result)
+                    formatted = "\n\n".join(results)
                 
                 return {
                     "success": True,
-                    "search_type": search_type,
-                    "query": query,
+                    "search_type": "iin",
+                    "query": iin,
                     "formatted": formatted,
                     "raw_data": data,
+                    "status_code": response.status
+                }
+            elif response.status == 404:
+                return {
+                    "success": True,
+                    "search_type": "iin",
+                    "query": iin,
+                    "formatted": "⚠️ Ничего не найдено по ИИН.",
                     "status_code": response.status
                 }
             else:
@@ -329,41 +333,140 @@ class PenaSession:
         except Exception as e:
             return {"success": False, "error": str(e)}
     
-    def _format_result(self, data: Any, search_type: str) -> str:
-        """Форматирование результата поиска"""
-        if not isinstance(data, list) or not data:
-            return "⚠️ Ничего не найдено."
-        
-        results = []
-        for i, item in enumerate(data[:5], 1):
-            if search_type == "iin":
-                result = f"{i}. 🧾 <b>ИИН: {item.get('iin', 'Нет')}</b>"
-                if item.get('snf'):
-                    result += f"\n   👤 {item.get('snf')}"
-                if item.get('phone_number'):
-                    result += f"\n   📱 {item.get('phone_number')}"
-                if item.get('birthday'):
-                    result += f"\n   📅 {item.get('birthday')}"
+    def _search_phone(self, phone: str) -> Dict:
+        """Поиск по телефону"""
+        try:
+            # Очищаем номер
+            clean = ''.join(filter(str.isdigit, phone))
+            if clean.startswith("8"):
+                clean = "7" + clean[1:]
             
-            elif search_type == "phone":
-                result = f"{i}. 📱 <b>Телефон: {item.get('phone_number', 'Нет')}</b>"
-                if item.get('snf'):
-                    result += f"\n   👤 {item.get('snf')}"
-                if item.get('iin'):
-                    result += f"\n   🧾 ИИН: {item.get('iin')}"
+            url = urljoin(BASE_URL, f"/api/v3/search/phone?phone={clean}&limit=10")
+            response = self.context.request.get(url, headers=self.headers, timeout=30000)
             
-            elif search_type == "fio":
-                result = f"{i}. 👤 <b>{item.get('snf', 'Нет ФИО')}</b>"
-                if item.get('iin'):
-                    result += f"\n   🧾 ИИН: {item.get('iin')}"
-                if item.get('birthday'):
-                    result += f"\n   📅 {item.get('birthday')}"
-                if item.get('phone_number'):
-                    result += f"\n   📱 Телефон: {item.get('phone_number')}"
+            if response.status == 200:
+                data = response.json()
+                
+                if not isinstance(data, list) or not data:
+                    formatted = f"⚠️ Ничего не найдено по номеру {phone}"
+                else:
+                    results = []
+                    for i, p in enumerate(data[:5], 1):
+                        result = f"{i}. 📱 <b>Телефон: {p.get('phone_number','')}</b>"
+                        if p.get('snf'):
+                            result += f"\n   👤 {p.get('snf','')}"
+                        if p.get('iin'):
+                            result += f"\n   🧾 ИИН: {p.get('iin','')}"
+                        results.append(result)
+                    formatted = "\n\n".join(results)
+                
+                return {
+                    "success": True,
+                    "search_type": "phone",
+                    "query": phone,
+                    "formatted": formatted,
+                    "raw_data": data,
+                    "status_code": response.status
+                }
+            elif response.status == 404:
+                return {
+                    "success": True,
+                    "search_type": "phone",
+                    "query": phone,
+                    "formatted": f"⚠️ Ничего не найдено по номеру {phone}",
+                    "status_code": response.status
+                }
+            else:
+                error_text = response.text()[:500]
+                return {
+                    "success": False,
+                    "error": f"HTTP {response.status}: {error_text}",
+                    "status_code": response.status
+                }
+                
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    def _search_fio(self, text: str) -> Dict:
+        """Поиск по ФИО"""
+        try:
+            # Определяем параметры поиска
+            if text.startswith(",,"):
+                parts = text[2:].strip().split()
+                if len(parts) < 2:
+                    return {
+                        "success": True,
+                        "search_type": "fio",
+                        "query": text,
+                        "formatted": "⚠️ Укажите имя и отчество после ',,'",
+                        "status_code": 400
+                    }
+                params = {
+                    "name": parts[0],
+                    "father_name": " ".join(parts[1:]),
+                    "smart_mode": "true",
+                    "limit": 10
+                }
+            else:
+                parts = text.split(" ")
+                params = {}
+                if len(parts) >= 1 and parts[0] != "":
+                    params["surname"] = parts[0]
+                if len(parts) >= 2 and parts[1] != "":
+                    params["name"] = parts[1]
+                if len(parts) >= 3 and parts[2] != "":
+                    params["father_name"] = parts[2]
+                params["smart_mode"] = "true"
+                params["limit"] = 10
             
-            results.append(result)
-        
-        return "\n\n".join(results)
+            query_string = urlencode(params)
+            url = urljoin(BASE_URL, f"/api/v3/search/fio?{query_string}")
+            response = self.context.request.get(url, headers=self.headers, timeout=30000)
+            
+            if response.status == 200:
+                data = response.json()
+                
+                if not isinstance(data, list) or not data:
+                    formatted = "⚠️ Ничего не найдено."
+                else:
+                    results = []
+                    for i, p in enumerate(data[:10], 1):
+                        result = f"{i}. 👤 <b>{p.get('snf','')}</b>"
+                        if p.get('iin'):
+                            result += f"\n   🧾 ИИН: {p.get('iin','')}"
+                        if p.get('birthday'):
+                            result += f"\n   📅 Дата рождения: {p.get('birthday','')}"
+                        if p.get('phone_number'):
+                            result += f"\n   📱 Телефон: {p.get('phone_number','')}"
+                        results.append(result)
+                    formatted = "📌 Результаты поиска по ФИО:\n\n" + "\n".join(results)
+                
+                return {
+                    "success": True,
+                    "search_type": "fio",
+                    "query": text,
+                    "formatted": formatted,
+                    "raw_data": data,
+                    "status_code": response.status
+                }
+            elif response.status == 404:
+                return {
+                    "success": True,
+                    "search_type": "fio",
+                    "query": text,
+                    "formatted": "⚠️ Ничего не найдено.",
+                    "status_code": response.status
+                }
+            else:
+                error_text = response.text()[:500]
+                return {
+                    "success": False,
+                    "error": f"HTTP {response.status}: {error_text}",
+                    "status_code": response.status
+                }
+                
+        except Exception as e:
+            return {"success": False, "error": str(e)}
     
     def execute_task(self, method_name: str, *args, **kwargs) -> Dict:
         """Добавление задачи в очередь и ожидание результата"""
