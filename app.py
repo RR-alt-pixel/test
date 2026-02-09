@@ -11,16 +11,16 @@ import hashlib
 import itertools
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Tuple
-from queue import Queue, Empty
+from queue import Queue, Empty, PriorityQueue
 from urllib.parse import urlencode, urljoin, quote
 from threading import Thread, Lock, Event, Timer
 from dataclasses import dataclass, asdict, field
-from concurrent.futures import ThreadPoolExecutor, Future, TimeoutError
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 
 import requests
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
-from playwright.sync_api import sync_playwright, Page, BrowserContext, Browser
+from playwright.sync_api import sync_playwright, Page, BrowserContext, Browser, TimeoutError as PlaywrightTimeoutError
 
 # ================== КОНСТАНТЫ И НАСТРОЙКИ ==================
 BASE_URL = "https://pena.rest"
@@ -85,6 +85,7 @@ class SearchRequest:
     status: str = "pending"  # pending, processing, completed, failed
     result: Optional[Any] = None
     error: Optional[str] = None
+    future: Optional[Future] = None
 
 @dataclass
 class UserSession:
@@ -235,7 +236,7 @@ class SessionManager:
             page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
             time.sleep(3)
             
-            # Проверяем, не попали ли мы уже на dashboard (например, если уже авторизованы)
+            # Проверяем, не попали ли мы уже на dashboard
             current_url = page.url
             if "dashboard" in current_url:
                 print(f"✅ Уже на dashboard: {current_url}")
@@ -407,7 +408,7 @@ class SessionManager:
         self.session_cycle = itertools.cycle(active_sessions) if active_sessions else None
     
     def make_request(self, session: SessionData, endpoint: str, params: Dict = None) -> Dict:
-        """Выполнение запроса через сессию"""
+        """Выполнение запроса через сессию (ДОЛЖНО ВЫЗЫВАТЬСЯ В ТОМ ЖЕ ПОТОКЕ, ЧТО И СЕССИЯ)"""
         self.stats["total_requests"] += 1
         
         try:
@@ -472,7 +473,7 @@ class SessionManager:
             }
     
     def refresh_session(self, session_id: str) -> bool:
-        """Обновление сессии"""
+        """Обновление сессии (ДОЛЖНО ВЫЗЫВАТЬСЯ В ТОМ ЖЕ ПОТОКЕ, ЧТО И СЕССИЯ)"""
         with self.lock:
             if session_id not in self.sessions:
                 return False
@@ -557,14 +558,14 @@ class SessionManager:
                 "queue_size": self.stats["queue_size"]
             }
 
-# ================== МЕНЕДЖЕР ПОИСКА ==================
+# ================== МЕНЕДЖЕР ПОИСКА (ИСПРАВЛЕННЫЙ) ==================
 class SearchManager:
     def __init__(self, session_manager: SessionManager):
         self.session_manager = session_manager
-        self.request_queue = Queue()
+        self.request_queue = PriorityQueue()  # Используем PriorityQueue для приоритетов
         self.results_cache: Dict[str, Dict] = {}
         self.cache_lock = Lock()
-        self.executor = ThreadPoolExecutor(max_workers=5)
+        self.request_lock = Lock()  # Блокировка для синхронизации запросов
         self.stats = {
             "total_searches": 0,
             "successful": 0,
@@ -572,30 +573,36 @@ class SearchManager:
             "cached": 0,
         }
         
-        # Запускаем воркеры
-        for i in range(3):
-            Thread(target=self._search_worker, daemon=True, name=f"SearchWorker-{i}").start()
+        # Запускаем основной воркер в отдельном потоке
+        self.worker_thread = Thread(target=self._main_worker, daemon=True, name="SearchMainWorker")
+        self.worker_thread.start()
         
         # Запускаем очистку кэша
         Thread(target=self._cache_cleaner, daemon=True).start()
     
-    def _search_worker(self):
-        """Воркер для обработки поисковых запросов"""
+    def _main_worker(self):
+        """Основной воркер - ВСЕ ЗАПРОСЫ ВЫПОЛНЯЮТСЯ В ЭТОМ ПОТОКЕ"""
+        print("🔧 Основной воркер поиска запущен")
+        
         while True:
             try:
-                request_data = self.request_queue.get(timeout=1)
+                # Получаем запрос из очереди с приоритетом
+                _, request_data = self.request_queue.get(timeout=1)
                 if request_data:
-                    self._process_search_request(request_data)
+                    self._process_search_request_safe(request_data)
             except Empty:
                 continue
             except Exception as e:
-                print(f"❌ Ошибка в воркере поиска: {e}")
+                print(f"❌ Ошибка в основном воркере: {e}")
+                traceback.print_exc()
     
-    def _process_search_request(self, request_data: Dict):
-        """Обработка поискового запроса"""
+    def _process_search_request_safe(self, request_data: Dict):
+        """Безопасная обработка поискового запроса в основном потоке воркера"""
         request_id = request_data["id"]
         query = request_data["query"]
         search_type = request_data["search_type"]
+        
+        print(f"🔍 Обработка запроса {request_id}: {search_type}:{query}")
         
         # Проверяем кэш
         cache_key = f"{search_type}:{query}"
@@ -606,16 +613,22 @@ class SearchManager:
                     self.stats["cached"] += 1
                     request_data["result"] = cached["result"]
                     request_data["status"] = "completed"
+                    if request_data.get("future"):
+                        request_data["future"].set_result(cached["result"])
+                    print(f"✅ Использован кэш для: {search_type}:{query}")
                     return
         
         self.stats["total_searches"] += 1
         
-        # Получаем сессию
+        # Получаем сессию (в том же потоке, что и воркер)
         session = self.session_manager.get_session()
         if not session:
             request_data["error"] = "Нет доступных сессий"
             request_data["status"] = "failed"
             self.stats["failed"] += 1
+            if request_data.get("future"):
+                request_data["future"].set_exception(Exception("Нет доступных сессий"))
+            print(f"❌ Нет доступных сессий для запроса {request_id}")
             return
         
         try:
@@ -623,7 +636,8 @@ class SearchManager:
             params = self._build_search_params(search_type, query)
             endpoint = self._get_search_endpoint(search_type)
             
-            # Выполняем запрос
+            # Выполняем запрос (В ТОМ ЖЕ ПОТОКЕ!)
+            print(f"📡 Выполняем запрос {endpoint} с параметрами {params}")
             result = self.session_manager.make_request(session, endpoint, params)
             
             if result["success"]:
@@ -643,13 +657,16 @@ class SearchManager:
                 request_data["status"] = "completed"
                 self.stats["successful"] += 1
                 
+                if request_data.get("future"):
+                    request_data["future"].set_result(formatted)
+                
                 print(f"✅ Поиск успешен: {search_type}:{query}")
             else:
                 # Если ошибка аутентификации, пробуем обновить сессию
                 if result.get("status") in [401, 403, 419]:
                     print(f"🔄 Обновление сессии из-за ошибки {result.get('status')}")
                     if self.session_manager.refresh_session(session.id):
-                        # Повторяем запрос с новой сессией
+                        # Пытаемся снова с новой сессией
                         session = self.session_manager.get_session()
                         if session:
                             result = self.session_manager.make_request(session, endpoint, params)
@@ -658,19 +675,32 @@ class SearchManager:
                                 request_data["result"] = formatted
                                 request_data["status"] = "completed"
                                 self.stats["successful"] += 1
+                                if request_data.get("future"):
+                                    request_data["future"].set_result(formatted)
                                 return
                 
                 request_data["error"] = result.get("error", "Unknown error")
                 request_data["status"] = "failed"
                 self.stats["failed"] += 1
+                
+                if request_data.get("future"):
+                    request_data["future"].set_exception(Exception(result.get("error", "Unknown error")))
+                
                 print(f"❌ Поиск не удался: {search_type}:{query} - {result.get('error')}")
                 
         except Exception as e:
             request_data["error"] = str(e)
             request_data["status"] = "failed"
             self.stats["failed"] += 1
+            
+            if request_data.get("future"):
+                request_data["future"].set_exception(e)
+            
             print(f"❌ Исключение при поиске: {e}")
             traceback.print_exc()
+        finally:
+            # Помечаем задачу как выполненную
+            self.request_queue.task_done()
     
     def _build_search_params(self, search_type: str, query: str) -> Dict:
         """Построение параметров поиска"""
@@ -759,7 +789,7 @@ class SearchManager:
                     print(f"🧹 Очищено из кэша: {len(to_remove)} записей")
     
     def search(self, user_id: int, query: str) -> Future:
-        """Добавление запроса в очередь поиска"""
+        """Добавление запроса в очередь поиска и возврат Future"""
         # Определяем тип поиска
         if query.isdigit() and len(query) == 12:
             search_type = "iin"
@@ -770,6 +800,10 @@ class SearchManager:
         
         # Создаем запрос
         request_id = f"{user_id}_{int(time.time())}_{random.randint(1000, 9999)}"
+        
+        # Создаем Future для отслеживания результата
+        future = Future()
+        
         request_data = {
             "id": request_id,
             "user_id": user_id,
@@ -778,30 +812,17 @@ class SearchManager:
             "created_at": time.time(),
             "status": "pending",
             "result": None,
-            "error": None
+            "error": None,
+            "future": future
         }
         
-        # Добавляем в очередь
+        # Добавляем в очередь с приоритетом (чем меньше user_id, тем выше приоритет)
+        priority = user_id  # Меньше user_id = выше приоритет
         self.session_manager.stats["queue_size"] = self.request_queue.qsize()
-        self.request_queue.put(request_data)
+        self.request_queue.put((priority, request_data))
         
-        # Возвращаем Future для отслеживания
-        future = Future()
+        print(f"📝 Добавлен запрос в очередь: {request_id} ({search_type}:{query})")
         
-        def check_status():
-            start_time = time.time()
-            while time.time() - start_time < QUEUE_TIMEOUT:
-                if request_data["status"] in ["completed", "failed"]:
-                    if request_data["status"] == "completed":
-                        future.set_result(request_data["result"])
-                    else:
-                        future.set_exception(Exception(request_data["error"]))
-                    break
-                time.sleep(0.1)
-            else:
-                future.set_exception(TimeoutError("Таймаут ожидания результата"))
-        
-        Thread(target=check_status, daemon=True).start()
         return future
     
     def get_stats(self) -> Dict:
@@ -1064,7 +1085,7 @@ def search():
         try:
             result = future.result(timeout=QUEUE_TIMEOUT)
             return jsonify({"result": result})
-        except TimeoutError:
+        except FutureTimeoutError:
             return jsonify({"error": "Таймаут ожидания результата"}), 408
         except Exception as e:
             return jsonify({"error": str(e)}), 500
