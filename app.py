@@ -23,6 +23,7 @@ from playwright.sync_api import sync_playwright, TimeoutError, Browser, BrowserC
 BASE_URL = "https://pena.rest"
 LOGIN_URL = f"{BASE_URL}/auth/login"
 SEARCH_URL = f"{BASE_URL}/dashboard/search"
+SECRET_TOKEN = "Refresh-Server-Key-2025-Oct-VK44"
 
 # Настройки безопасности для телеграм-пользователей
 USER_SESSION_TTL = 3600  # 1 час для телеграм сессий
@@ -1228,6 +1229,41 @@ def debug_accounts():
         'accounts': ACCOUNTS,
         'count': len(ACCOUNTS)
     })
+
+# После других endpoints добавьте:
+
+@app.route('/api/refresh-users', methods=['POST'])
+def refresh_users():
+    """Принудительное обновление списка разрешенных пользователей"""
+    try:
+        # Проверка авторизации через Bearer токен
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Требуется авторизация'}), 401
+        
+        token = auth_header.split(' ')[1]
+        if token != SECRET_TOKEN:
+            return jsonify({'error': 'Неверный токен авторизации'}), 403
+        
+        # Загружаем обновленный список пользователей
+        old_count = len(ALLOWED_USER_IDS)
+        load_allowed_users()
+        new_count = len(ALLOWED_USER_IDS)
+        
+        print(f"🔄 Список пользователей обновлен: {old_count} -> {new_count}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Список пользователей обновлен: {old_count} -> {new_count}',
+            'old_count': old_count,
+            'new_count': new_count,
+            'users': ALLOWED_USER_IDS
+        })
+        
+    except Exception as e:
+        print(f"❌ Ошибка обновления пользователей: {e}")
+        traceback.print_exc()
+        return jsonify({'error': 'Внутренняя ошибка'}), 500
 
 # ================== ФОНГОВЫЕ ЗАДАЧИ ==================
 def telegram_session_cleanup_task():
