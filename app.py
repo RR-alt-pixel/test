@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# server_complete.py
 import os
 import time
 import json
@@ -9,20 +9,24 @@ import random
 import queue
 import sys
 from datetime import datetime
-from urllib.parse import urljoin, quote, urlencode
+from urllib.parse import urljoin, urlencode
 from typing import Optional, Dict, List, Any, Tuple
 from collections import defaultdict
 
 import requests
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
-from playwright.sync_api import sync_playwright, TimeoutError, Browser, BrowserContext, Page
+from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
 
 # ================== КОНСТАНТЫ ==================
 BASE_URL = "https://pena.rest"
 LOGIN_URL = f"{BASE_URL}/auth/login"
 SEARCH_URL = f"{BASE_URL}/dashboard/search"
 SECRET_TOKEN = "Refresh-Server-Key-2025-Oct-VK44"
+
+# Настройки сессий
+SESSION_TTL = 3600  # 1 час для телеграм сессий
+SESSION_CLEANUP_INTERVAL = 300  # 5 минут очистки
 
 # ================== ЗАГРУЗКА АККАУНТОВ ==================
 def load_accounts():
@@ -67,30 +71,47 @@ def load_accounts():
 ACCOUNTS = load_accounts()
 
 # ================== СИСТЕМА СЕССИЙ ДЛЯ ТЕЛЕГРАМ-ПОЛЬЗОВАТЕЛЕЙ ==================
-# Словарь для хранения сессий: user_id -> session_data
-user_sessions = {}
-user_sessions_lock = threading.Lock()
+telegram_sessions = {}
+telegram_sessions_lock = threading.Lock()
 
-# Разрешенные пользователи
-ALLOWED_USERS_URL = "https://raw.githubusercontent.com/RR-alt-pixel/test/refs/heads/main/allowed_ids.json"
-ALLOWED_USER_IDS = []
+def get_device_fingerprint(request_obj) -> str:
+    """Создание отпечатка устройства"""
+    user_agent = request_obj.headers.get('User-Agent', '')
+    ip = request_obj.remote_addr
+    data = f"{user_agent}_{ip}"
+    return hashlib.md5(data.encode()).hexdigest()
 
-def load_allowed_users():
-    """Загрузка разрешенных пользователей"""
-    global ALLOWED_USER_IDS
-    try:
-        print(f"🔐 Загрузка разрешенных пользователей...")
-        response = requests.get(ALLOWED_USERS_URL, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            ALLOWED_USER_IDS = [int(uid) for uid in data.get("allowed_users", [])]
-            print(f"✅ Загружено {len(ALLOWED_USER_IDS)} пользователей")
-        else:
-            print(f"⚠️ Не удалось загрузить пользователей")
-            ALLOWED_USER_IDS = []
-    except Exception as e:
-        print(f"❌ Ошибка загрузки пользователей: {e}")
-        ALLOWED_USER_IDS = []
+def create_session_token(user_id: int) -> str:
+    """Создание уникального токена сессии"""
+    timestamp = int(time.time())
+    random_part = random.randint(1000, 9999)
+    return f"{user_id}_{timestamp}_{random_part}_{hashlib.md5(f'{user_id}{timestamp}{random_part}'.encode()).hexdigest()[:8]}"
+
+def cleanup_expired_sessions():
+    """Очистка истекших сессий"""
+    while True:
+        try:
+            current_time = time.time()
+            cleaned_count = 0
+            
+            with telegram_sessions_lock:
+                expired_users = []
+                for user_id, session in telegram_sessions.items():
+                    if current_time - session['created'] > SESSION_TTL:
+                        expired_users.append(user_id)
+                
+                for user_id in expired_users:
+                    del telegram_sessions[user_id]
+                    cleaned_count += 1
+            
+            if cleaned_count > 0:
+                print(f"🧹 Очищено {cleaned_count} истекших сессий")
+            
+            time.sleep(SESSION_CLEANUP_INTERVAL)
+            
+        except Exception as e:
+            print(f"❌ Ошибка очистки сессий: {e}")
+            time.sleep(60)
 
 # ================== КЛАСС СЕССИИ PLAYWRIGHT ==================
 class PenaSession:
@@ -786,26 +807,38 @@ CORS(app)
 # Глобальные объекты
 pena_session_manager = PenaSessionManager()
 
-def cleanup_user_sessions():
-    """Очистка просроченных сессий пользователей"""
-    while True:
-        try:
-            current_time = time.time()
-            expired_users = []
-            
-            with user_sessions_lock:
-                for user_id, session_data in list(user_sessions.items()):
-                    if current_time - session_data['created'] > 3600:  # 1 час
-                        expired_users.append(user_id)
-                
-                for user_id in expired_users:
-                    del user_sessions[user_id]
-                    print(f"🧹 Удалена просроченная сессия пользователя {user_id}")
-            
-            time.sleep(300)  # Проверка каждые 5 минут
-        except Exception as e:
-            print(f"❌ Ошибка очистки сессий: {e}")
+# Разрешенные пользователи
+ALLOWED_USERS_URL = "https://raw.githubusercontent.com/RR-alt-pixel/test/refs/heads/main/allowed_ids.json"
+ALLOWED_USER_IDS = []
+LAST_FETCH_TIME = 0
+FETCH_INTERVAL = 3600  # 1 час
 
+def load_allowed_users():
+    """Загрузка разрешенных пользователей"""
+    global ALLOWED_USER_IDS, LAST_FETCH_TIME
+    try:
+        print(f"🔐 Загрузка разрешенных пользователей...")
+        response = requests.get(ALLOWED_USERS_URL, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            ALLOWED_USER_IDS = [int(uid) for uid in data.get("allowed_users", [])]
+            LAST_FETCH_TIME = int(time.time())
+            print(f"✅ Загружено {len(ALLOWED_USER_IDS)} пользователей")
+        else:
+            print(f"⚠️ Не удалось загрузить пользователей")
+            ALLOWED_USER_IDS = []
+    except Exception as e:
+        print(f"❌ Ошибка загрузки пользователей: {e}")
+        ALLOWED_USER_IDS = []
+
+def periodic_fetch():
+    """Периодическая загрузка разрешенных пользователей"""
+    while True:
+        if int(time.time()) - LAST_FETCH_TIME >= FETCH_INTERVAL:
+            load_allowed_users()
+        time.sleep(FETCH_INTERVAL)
+
+# ================== API ENDPOINTS ==================
 @app.before_request
 def before_request():
     """Обработка CORS"""
@@ -816,10 +849,26 @@ def before_request():
         response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
         return response
 
-# ================== API СЕССИЙ ДЛЯ ТЕЛЕГРАМ-ПОЛЬЗОВАТЕЛЕЙ ==================
+@app.route('/api/health', methods=['GET'])
+def health():
+    """Проверка здоровья сервера"""
+    status = pena_session_manager.get_status()
+    return jsonify({
+        'status': 'ok',
+        'timestamp': datetime.now().isoformat(),
+        'total_accounts': len(ACCOUNTS),
+        'active_sessions': status['active_sessions'],
+        'total_sessions': status['total_sessions'],
+        'busy_sessions': status['busy_sessions'],
+        'failed_sessions': status['failed_sessions'],
+        'cache_size': status['cache_size'],
+        'telegram_sessions': len(telegram_sessions),
+        'queue_size': 0
+    })
+
 @app.route('/api/session/start', methods=['POST'])
-def start_telegram_session():
-    """Создание сессии телеграм-пользователя (СТАРАЯ ЛОГИКА)"""
+def start_session():
+    """Создание сессии телеграм-пользователя"""
     try:
         if not request.is_json:
             return jsonify({'error': 'Content-Type должен быть application/json'}), 415
@@ -830,8 +879,9 @@ def start_telegram_session():
         if not user_id:
             return jsonify({'error': 'Не указан Telegram ID'}), 400
         
-        # Загружаем актуальный список пользователей
-        load_allowed_users()
+        # Обновляем список пользователей если нужно
+        if int(time.time()) - LAST_FETCH_TIME >= FETCH_INTERVAL:
+            load_allowed_users()
         
         user_id_int = int(user_id)
         
@@ -840,35 +890,66 @@ def start_telegram_session():
             print(f"❌ Пользователь {user_id_int} не имеет доступа")
             return jsonify({'error': 'Нет доступа'}), 403
         
-        # Генерируем токен сессии (старая логика)
-        session_token = f"{user_id_int}_{int(time.time())}_{random.randint(1000, 9999)}"
+        # Получаем отпечаток устройства
+        device_fingerprint = get_device_fingerprint(request)
+        current_time = time.time()
         
-        # Получаем device fingerprint
-        device_fingerprint = request.headers.get('User-Agent', '') + request.remote_addr
-        
-        # Сохраняем сессию (старая логика - перезаписываем существующую)
-        with user_sessions_lock:
-            # НЕ удаляем старую сессию, просто перезаписываем
-            user_sessions[user_id_int] = {
+        with telegram_sessions_lock:
+            # Проверяем, есть ли активная сессия
+            if user_id_int in telegram_sessions:
+                session_data = telegram_sessions[user_id_int]
+                
+                # Проверяем, не истекла ли сессия
+                if current_time - session_data['created'] <= SESSION_TTL:
+                    # Активная сессия не истекла - запрещаем создание новой
+                    print(f"🚫 Попытка создать новую сессию при активной (user: {user_id_int})")
+                    remaining_time = int(SESSION_TTL - (current_time - session_data['created']))
+                    remaining_minutes = remaining_time // 60
+                    remaining_seconds = remaining_time % 60
+                    
+                    return jsonify({
+                        'error': f'У вас уже есть активная сессия. Дождитесь истечения ({remaining_minutes} мин {remaining_seconds} сек) или завершите текущую сессию.',
+                        'session_active': True,
+                        'created_at': datetime.fromtimestamp(session_data['created']).isoformat(),
+                        'expires_at': datetime.fromtimestamp(session_data['created'] + SESSION_TTL).isoformat(),
+                        'remaining_time': remaining_time
+                    }), 403
+                else:
+                    # Сессия истекла - удаляем её
+                    print(f"🗑️ Удалена истекшая сессия пользователя {user_id_int}")
+                    del telegram_sessions[user_id_int]
+            
+            # Создаем новую сессию
+            session_token = create_session_token(user_id_int)
+            
+            telegram_sessions[user_id_int] = {
                 'token': session_token,
-                'created': time.time(),
+                'created': current_time,
+                'device_fingerprint': device_fingerprint,
                 'ip': request.remote_addr,
-                'user_agent': request.headers.get('User-Agent', ''),
-                'device_fingerprint': hashlib.md5(device_fingerprint.encode()).hexdigest()
+                'user_agent': request.headers.get('User-Agent', '')
             }
+            
+            print(f"✅ Создана новая сессия для пользователя {user_id_int}")
+            print(f"   Токен: {session_token[:30]}...")
+            print(f"   Устройство: {device_fingerprint[:16]}...")
+            print(f"   IP: {request.remote_addr}")
         
-        print(f"🔑 Создана сессия для пользователя {user_id_int} с IP {request.remote_addr}")
-        return jsonify({'session_token': session_token})
+        return jsonify({
+            'session_token': session_token,
+            'created_at': datetime.fromtimestamp(current_time).isoformat(),
+            'expires_in': SESSION_TTL,
+            'message': 'Сессия создана. Она активна 1 час.'
+        })
         
     except Exception as e:
         print(f"❌ Ошибка создания сессии: {e}")
         traceback.print_exc()
         return jsonify({'error': 'Внутренняя ошибка'}), 500
 
-# ================== API ПОИСКА ==================
 @app.route('/api/search', methods=['POST'])
 def search():
-    """Поиск по ИИН, телефону или ФИО (СТАРАЯ ЛОГИКА ПРОВЕРКИ)"""
+    """Поиск с проверкой сессии"""
     try:
         if not request.is_json:
             return jsonify({'error': 'Content-Type должен быть application/json'}), 415
@@ -884,30 +965,30 @@ def search():
         if not query:
             return jsonify({'error': 'Пустой запрос'}), 400
         
-        # Проверяем сессию (старая логика)
+        # Проверяем сессию
         user_id_int = int(user_id)
+        current_time = time.time()
         
-        with user_sessions_lock:
-            session = user_sessions.get(user_id_int)
+        with telegram_sessions_lock:
+            session = telegram_sessions.get(user_id_int)
         
-        if not session or session['token'] != session_token:
-            return jsonify({'error': 'Недействительная сессия'}), 403
+        if not session:
+            return jsonify({'error': 'Сессия не найдена. Создайте новую сессию.'}), 403
         
-        # Проверяем, не истекла ли сессия (1 час)
-        if time.time() - session['created'] > 3600:
-            with user_sessions_lock:
-                if user_id_int in user_sessions:
-                    del user_sessions[user_id_int]
-            return jsonify({'error': 'Сессия истекла'}), 403
+        if session['token'] != session_token:
+            return jsonify({'error': 'Недействительный токен сессии'}), 403
         
-        # ПРОВЕРКА УСТРОЙСТВА (НОВАЯ ФУНКЦИОНАЛЬНОСТЬ)
-        # Если устройство отличается от того, на котором была создана сессия
-        current_device_fingerprint = hashlib.md5(
-            (request.headers.get('User-Agent', '') + request.remote_addr).encode()
-        ).hexdigest()
+        # Проверяем, не истекла ли сессия
+        if current_time - session['created'] > SESSION_TTL:
+            with telegram_sessions_lock:
+                if user_id_int in telegram_sessions:
+                    del telegram_sessions[user_id_int]
+            return jsonify({'error': 'Сессия истекла. Создайте новую сессию.'}), 403
         
+        # Проверяем устройство
+        current_device_fingerprint = get_device_fingerprint(request)
         if session['device_fingerprint'] != current_device_fingerprint:
-            print(f"⚠️ Попытка доступа с другого устройства для пользователя {user_id_int}")
+            print(f"⚠️ Попытка доступа с другого устройства (user: {user_id_int})")
             return jsonify({
                 'error': 'Сессия была создана на другом устройстве. Пожалуйста, войдите заново.',
                 'device_mismatch': True
@@ -924,7 +1005,6 @@ def search():
             formatted_result = result.get('formatted')
             if formatted_result:
                 print(f"📏 Длина отформатированного результата: {len(formatted_result)}")
-                print(f"📄 Результат: {formatted_result[:100]}...")
                 return jsonify({'result': formatted_result})
             else:
                 print("⚠️ Отформатированный результат отсутствует")
@@ -937,24 +1017,6 @@ def search():
         print(f"❌ Ошибка поиска: {e}")
         traceback.print_exc()
         return jsonify({'error': 'Внутренняя ошибка'}), 500
-
-# ================== DEBUG API ==================
-@app.route('/api/health', methods=['GET'])
-def health():
-    """Проверка здоровья сервера"""
-    status = pena_session_manager.get_status()
-    return jsonify({
-        'status': 'ok',
-        'timestamp': datetime.now().isoformat(),
-        'total_accounts': len(ACCOUNTS),
-        'active_sessions': status['active_sessions'],
-        'total_sessions': status['total_sessions'],
-        'busy_sessions': status['busy_sessions'],
-        'failed_sessions': status['failed_sessions'],
-        'cache_size': status['cache_size'],
-        'telegram_sessions': len(user_sessions),
-        'queue_size': 0
-    })
 
 @app.route('/api/refresh-users', methods=['POST'])
 def refresh_users():
@@ -987,6 +1049,70 @@ def refresh_users():
         traceback.print_exc()
         return jsonify({'error': 'Внутренняя ошибка'}), 500
 
+@app.route('/api/session/status', methods=['POST'])
+def session_status():
+    """Проверка статуса сессии"""
+    data = request.json or {}
+    user_id = data.get('telegram_user_id')
+    
+    if not user_id:
+        return jsonify({'error': 'Не указан Telegram ID'}), 400
+    
+    user_id_int = int(user_id)
+    
+    with telegram_sessions_lock:
+        session = telegram_sessions.get(user_id_int)
+    
+    if not session:
+        return jsonify({
+            'has_session': False,
+            'message': 'Активной сессии нет'
+        })
+    
+    current_time = time.time()
+    session_age = current_time - session['created']
+    is_expired = session_age > SESSION_TTL
+    remaining_time = max(0, SESSION_TTL - session_age)
+    
+    return jsonify({
+        'has_session': True,
+        'is_active': not is_expired,
+        'token': session['token'],
+        'created_at': datetime.fromtimestamp(session['created']).isoformat(),
+        'device_fingerprint': session['device_fingerprint'][:16] + '...',
+        'ip': session['ip'],
+        'session_age': int(session_age),
+        'remaining_time': int(remaining_time),
+        'is_expired': is_expired,
+        'message': f'Сессия активна ({int(remaining_time//60)} мин {int(remaining_time%60)} сек осталось)' if not is_expired else 'Сессия истекла'
+    })
+
+@app.route('/api/session/end', methods=['POST'])
+def end_session():
+    """Завершение текущей сессии"""
+    data = request.json or {}
+    user_id = data.get('telegram_user_id')
+    session_token = data.get('session_token')
+    
+    if not user_id or not session_token:
+        return jsonify({'error': 'Не указаны учетные данные'}), 400
+    
+    user_id_int = int(user_id)
+    
+    with telegram_sessions_lock:
+        if user_id_int in telegram_sessions:
+            if telegram_sessions[user_id_int]['token'] == session_token:
+                del telegram_sessions[user_id_int]
+                print(f"✅ Сессия пользователя {user_id_int} завершена")
+                return jsonify({
+                    'success': True,
+                    'message': 'Сессия успешно завершена'
+                })
+            else:
+                return jsonify({'error': 'Неверный токен сессии'}), 403
+        else:
+            return jsonify({'error': 'Сессия не найдена'}), 404
+
 @app.route('/api/debug/sessions', methods=['GET'])
 def debug_sessions():
     """Отладочная информация о сессиях Playwright"""
@@ -997,17 +1123,27 @@ def debug_sessions():
 def debug_telegram_sessions():
     """Отладочная информация о сессиях телеграм-пользователей"""
     sessions_info = []
-    for user_id, session in user_sessions.items():
-        sessions_info.append({
-            'user_id': user_id,
-            'created': datetime.fromtimestamp(session['created']).isoformat(),
-            'ip': session['ip'],
-            'device_fingerprint': session['device_fingerprint'][:20] + '...',
-            'expires_in': 3600 - (time.time() - session['created'])
-        })
+    with telegram_sessions_lock:
+        for user_id, session in telegram_sessions.items():
+            current_time = time.time()
+            session_age = current_time - session['created']
+            is_expired = session_age > SESSION_TTL
+            remaining_time = max(0, SESSION_TTL - session_age)
+            
+            sessions_info.append({
+                'user_id': user_id,
+                'created': datetime.fromtimestamp(session['created']).isoformat(),
+                'ip': session['ip'],
+                'device_fingerprint': session['device_fingerprint'][:16] + '...',
+                'session_age': int(session_age),
+                'remaining_time': int(remaining_time),
+                'is_expired': is_expired,
+                'token_prefix': session['token'][:30] + '...'
+            })
     
     return jsonify({
         'active_sessions': len(sessions_info),
+        'total_sessions': len(telegram_sessions),
         'sessions': sessions_info
     })
 
@@ -1032,7 +1168,7 @@ def debug_accounts():
         'count': len(ACCOUNTS)
     })
 
-# ================== ЗАПУСК ==================
+# ================== ЗАПУСК СЕРВЕРА ==================
 def cleanup_on_exit():
     """Очистка при выходе"""
     print("\n🛑 Очистка ресурсов при выходе...")
@@ -1045,7 +1181,7 @@ if __name__ == '__main__':
     signal.signal(signal.SIGTERM, lambda s, f: cleanup_on_exit())
     
     print("\n" + "=" * 60)
-    print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА")
+    print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА С СИСТЕМОЙ БЕЗОПАСНОСТИ")
     print("=" * 60)
     
     # Загружаем разрешенных пользователей
@@ -1053,21 +1189,27 @@ if __name__ == '__main__':
     
     # Инициализируем сессии Playwright
     if pena_session_manager.initialize():
-        # Запускаем очистку сессий телеграм-пользователей
-        cleanup_thread = threading.Thread(target=cleanup_user_sessions, daemon=True)
+        # Запускаем фоновые задачи
+        fetch_thread = threading.Thread(target=periodic_fetch, daemon=True)
+        fetch_thread.start()
+        
+        cleanup_thread = threading.Thread(target=cleanup_expired_sessions, daemon=True)
         cleanup_thread.start()
         
         print(f"\n✅ СЕРВЕР ГОТОВ К РАБОТЕ!")
         print(f"📊 Активных сессий Playwright: {len([s for s in pena_session_manager.sessions if s.is_active])}")
         print(f"👤 Аккаунтов pena.rest: {len(ACCOUNTS)}")
         print(f"🔐 Разрешенных телеграм-пользователей: {len(ALLOWED_USER_IDS)}")
-        print(f"🔑 Всего сессий телеграм-пользователей: {len(user_sessions)}")
+        print(f"🔑 Система сессий: 1 сессия на пользователя, время жизни: {SESSION_TTL//60} минут")
         print(f"🌐 API доступен по адресу: http://0.0.0.0:5000")
+        print(f"🔑 Секретный токен для обновления: {SECRET_TOKEN}")
         print("\n📋 Доступные endpoint-ы:")
         print("  /api/health               - Проверка состояния")
         print("  /api/session/start        - Создание сессии телеграм-пользователя")
+        print("  /api/session/status       - Проверка статуса сессии")
+        print("  /api/session/end          - Завершение сессии")
         print("  /api/search               - Поиск по ИИН/телефону/ФИО")
-        print("  /api/refresh-users        - Обновление списка пользователей")
+        print("  /api/refresh-users        - Обновление списка пользователей (Bearer Token)")
         print("  /api/debug/sessions       - Отладка сессий Playwright")
         print("  /api/debug/telegram_sessions - Отладка сессий телеграм-пользователей")
         print("  /api/debug/accounts       - Просмотр аккаунтов")
