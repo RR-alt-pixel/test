@@ -1,20 +1,21 @@
-# -*- coding: utf-8 -*-
+# server_fixed.py
 import os
 import time
 import json
-import random
-import threading
-import traceback
 import hashlib
+import traceback
+import threading
+import random
+import queue
+import sys
 from datetime import datetime
-from typing import Optional, Dict, List, Any
-from queue import Queue
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urljoin, quote, urlencode
+from typing import Optional, Dict, List, Any, Tuple
 
 import requests
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
-from playwright.sync_api import sync_playwright, Page, BrowserContext, Browser
+from playwright.sync_api import sync_playwright, TimeoutError, Browser, BrowserContext, Page
 
 # ================== КОНСТАНТЫ ==================
 BASE_URL = "https://pena.rest"
@@ -30,30 +31,42 @@ ACCOUNTS = [
 ALLOWED_USERS_URL = "https://raw.githubusercontent.com/RR-alt-pixel/test/refs/heads/main/allowed_ids.json"
 ALLOWED_USER_IDS = []
 
-# ================== СЕССИЯ PLAYWRIGHT ==================
+# ================== КЛАСС СЕССИИ PLAYWRIGHT ==================
 class PenaSession:
-    """Сессия для работы с pena.rest в одном потоке"""
+    """Сессия Playwright для работы с pena.rest (работает в своем потоке)"""
     
     def __init__(self, account: Dict):
         self.account = account
+        self.playwright = None
         self.browser = None
         self.context = None
         self.page = None
-        self.cookies = {}
         self.fingerprint = None
+        self.cookies = {}
         self.headers = {}
         self.is_active = False
-        self.last_used = 0
+        self.last_used = time.time()
+        self.captured_fingerprints = []
         
-    def login(self):
-        """Логин на сайт"""
-        print(f"🔐 Логин {self.account['username']}...")
+        # Очередь задач для этого потока
+        self.task_queue = queue.Queue()
+        self.result_queue = queue.Queue()
+        self.stop_event = threading.Event()
+        
+        # Запускаем поток для этой сессии
+        self.thread = threading.Thread(target=self._run_worker, daemon=True)
+        self.thread.start()
+    
+    def _run_worker(self):
+        """Главный рабочий поток сессии (ВСЕ операции с Playwright здесь)"""
+        print(f"🔧 Запущен рабочий поток для {self.account['username']}")
         
         try:
-            # Запускаем браузер
-            playwright = sync_playwright().start()
+            # Инициализируем Playwright в этом потоке
+            self.playwright = sync_playwright().start()
             
-            self.browser = playwright.chromium.launch(
+            # Запускаем браузер
+            self.browser = self.playwright.chromium.launch(
                 headless=True,
                 args=[
                     "--no-sandbox",
@@ -64,9 +77,10 @@ class PenaSession:
                     "--disable-web-security",
                     "--disable-features=IsolateOrigins,site-per-process",
                 ],
-                slow_mo=100
+                timeout=60000
             )
             
+            # Создаем контекст
             self.context = self.browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
                 viewport={"width": 1920, "height": 1080},
@@ -85,7 +99,76 @@ class PenaSession:
             
             self.page = self.context.new_page()
             
-            # Логин
+            # Логинимся
+            if self._login():
+                self.is_active = True
+                print(f"✅ Сессия {self.account['username']} активна")
+            else:
+                print(f"❌ Не удалось войти для {self.account['username']}")
+                return
+            
+            # Основной цикл обработки задач
+            while not self.stop_event.is_set():
+                try:
+                    # Получаем задачу из очереди
+                    task_id, method_name, args, kwargs = self.task_queue.get(timeout=1)
+                    
+                    if method_name == "stop":
+                        break
+                    
+                    # Выполняем метод
+                    try:
+                        if hasattr(self, method_name):
+                            method = getattr(self, method_name)
+                            result = method(*args, **kwargs)
+                            self.result_queue.put((task_id, {"success": True, "result": result}))
+                        else:
+                            self.result_queue.put((task_id, {"success": False, "error": f"Метод {method_name} не найден"}))
+                    except Exception as e:
+                        self.result_queue.put((task_id, {"success": False, "error": str(e)}))
+                    
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    print(f"❌ Ошибка в рабочем потоке: {e}")
+                    
+        except Exception as e:
+            print(f"❌ Критическая ошибка в потоке {self.account['username']}: {e}")
+            traceback.print_exc()
+        finally:
+            self._cleanup()
+    
+    def _login(self) -> bool:
+        """Логин на сайт (выполняется в рабочем потоке)"""
+        try:
+            print(f"🔐 Логин {self.account['username']}...")
+            
+            # Настраиваем перехватчик запросов для сбора fingerprint
+            def extract_fingerprint(request):
+                # Ищем в заголовках
+                if 'x-device-fingerprint' in request.headers:
+                    fp = request.headers['x-device-fingerprint']
+                    if fp and len(fp) == 64 and fp not in self.captured_fingerprints:
+                        self.captured_fingerprints.append(fp)
+                        print(f"[{self.account['username']}] Найден fingerprint: {fp[:30]}...")
+                        self.fingerprint = fp
+                
+                # Ищем в теле запроса
+                if request.post_data:
+                    try:
+                        data = json.loads(request.post_data)
+                        if 'device_fingerprint' in data and data['device_fingerprint']:
+                            fp = data['device_fingerprint']
+                            if fp and len(fp) == 64 and fp not in self.captured_fingerprints:
+                                self.captured_fingerprints.append(fp)
+                                print(f"[{self.account['username']}] Найден fingerprint в теле: {fp[:30]}...")
+                                self.fingerprint = fp
+                    except:
+                        pass
+            
+            self.page.on("request", extract_fingerprint)
+            
+            # Переходим на страницу логина
             self.page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
             time.sleep(2)
             
@@ -107,16 +190,21 @@ class PenaSession:
                 time.sleep(2)
             
             # Переходим на страницу поиска
+            print(f"🌐 Переходим на страницу поиска...")
             self.page.goto(SEARCH_URL, wait_until="networkidle", timeout=30000)
             time.sleep(3)
+            
+            # Если fingerprint не извлечен, генерируем
+            if not self.fingerprint and self.captured_fingerprints:
+                self.fingerprint = self.captured_fingerprints[0]
+            elif not self.fingerprint:
+                print(f"⚠️ Fingerprint не извлечен, генерируем...")
+                self.fingerprint = self._generate_fingerprint()
             
             # Получаем куки
             cookies_list = self.context.cookies()
             self.cookies = {c['name']: c['value'] for c in cookies_list}
             cookie_header = "; ".join([f"{c['name']}={c['value']}" for c in cookies_list])
-            
-            # Генерируем fingerprint
-            self.fingerprint = self._generate_fingerprint()
             
             # Формируем заголовки
             self.headers = {
@@ -138,23 +226,20 @@ class PenaSession:
                 "x-requested-with": "XMLHttpRequest"
             }
             
-            self.is_active = True
             self.last_used = time.time()
-            
-            print(f"✅ Сессия создана для {self.account['username']}")
-            print(f"📋 Fingerprint: {self.fingerprint[:30]}...")
-            print(f"🍪 Куки: {len(self.cookies)} шт.")
+            print(f"✅ Логин успешен для {self.account['username']}")
+            print(f"  Fingerprint: {self.fingerprint[:30]}...")
+            print(f"  Куки: {len(self.cookies)} шт.")
             
             return True
             
         except Exception as e:
-            print(f"❌ Ошибка создания сессии: {e}")
+            print(f"❌ Ошибка логина для {self.account['username']}: {e}")
             traceback.print_exc()
-            self.close()
             return False
     
     def _generate_fingerprint(self) -> str:
-        """Генерация fingerprint"""
+        """Генерация fingerprint (резервный метод)"""
         try:
             browser_data = self.page.evaluate("""
                 () => {
@@ -181,12 +266,20 @@ class PenaSession:
             data_str = f"{self.account['username']}{int(time.time())}{random.randint(1000, 9999)}"
             return hashlib.sha256(data_str.encode()).hexdigest()
     
-    def search(self, search_type: str, query: str) -> Dict:
-        """Выполнение поискового запроса"""
+    def search(self, query: str) -> Dict:
+        """Поиск по запросу (выполняется в рабочем потоке)"""
         self.last_used = time.time()
         
         try:
-            # Формируем URL и параметры
+            # Определяем тип поиска
+            if query.isdigit() and len(query) == 12:
+                search_type = "iin"
+            elif query.startswith(("+", "8", "7")):
+                search_type = "phone"
+            else:
+                search_type = "fio"
+            
+            # Формируем URL
             if search_type == "iin":
                 url = urljoin(BASE_URL, f"/api/v3/search/iin?iin={query}")
             elif search_type == "phone":
@@ -207,112 +300,34 @@ class PenaSession:
                 params["limit"] = 10
                 query_string = urlencode(params)
                 url = urljoin(BASE_URL, f"/api/v3/search/fio?{query_string}")
-            else:
-                return {"success": False, "error": f"Неизвестный тип поиска: {search_type}"}
             
             # Выполняем запрос
             response = self.context.request.get(url, headers=self.headers, timeout=30000)
             
             if response.status == 200:
                 data = response.json()
-                return {"success": True, "data": data}
+                
+                # Форматируем результат
+                formatted = self._format_result(data, search_type)
+                
+                return {
+                    "success": True,
+                    "search_type": search_type,
+                    "query": query,
+                    "formatted": formatted,
+                    "raw_data": data,
+                    "status_code": response.status
+                }
             else:
                 error_text = response.text()[:500]
-                print(f"❌ Ошибка запроса: HTTP {response.status}")
-                return {"success": False, "error": f"HTTP {response.status}: {error_text}"}
+                return {
+                    "success": False,
+                    "error": f"HTTP {response.status}: {error_text}",
+                    "status_code": response.status
+                }
                 
         except Exception as e:
-            print(f"❌ Исключение при запросе: {e}")
             return {"success": False, "error": str(e)}
-    
-    def close(self):
-        """Закрытие сессии"""
-        try:
-            if self.page:
-                self.page.close()
-            if self.context:
-                self.context.close()
-            if self.browser:
-                self.browser.close()
-            self.is_active = False
-            print(f"✅ Сессия закрыта")
-        except:
-            pass
-
-# ================== МЕНЕДЖЕР СЕССИЙ ==================
-class SessionManager:
-    """Управление сессиями - ВСЕ В ОДНОМ ПОТОКЕ"""
-    
-    def __init__(self):
-        self.sessions: List[PenaSession] = []
-        self.current_index = 0
-        self.lock = threading.Lock()
-        self.request_queue = Queue()
-        self.worker_thread = None
-        
-    def initialize(self):
-        """Инициализация сессий"""
-        print("🔄 Инициализация сессий...")
-        
-        for account in ACCOUNTS:
-            session = PenaSession(account)
-            if session.login():
-                self.sessions.append(session)
-        
-        if self.sessions:
-            print(f"✅ Создано сессий: {len(self.sessions)}")
-            # Запускаем воркер для обработки запросов
-            self.worker_thread = threading.Thread(target=self._process_requests, daemon=True)
-            self.worker_thread.start()
-            return True
-        else:
-            print("❌ Не удалось создать ни одной сессии")
-            return False
-    
-    def _process_requests(self):
-        """Обработка запросов из очереди (в одном потоке)"""
-        print("🔧 Запущен воркер обработки запросов")
-        
-        while True:
-            try:
-                # Получаем запрос из очереди
-                request_data = self.request_queue.get(timeout=1)
-                
-                # Обрабатываем запрос
-                self._handle_request(request_data)
-                
-            except Exception as e:
-                continue
-    
-    def _handle_request(self, request_data: Dict):
-        """Обработка одного запроса"""
-        try:
-            # Выбираем сессию (round-robin)
-            with self.lock:
-                if not self.sessions:
-                    request_data['result'] = "❌ Нет активных сессий"
-                    request_data['event'].set()
-                    return
-                
-                session = self.sessions[self.current_index]
-                self.current_index = (self.current_index + 1) % len(self.sessions)
-            
-            # Выполняем поиск
-            result = session.search(request_data['search_type'], request_data['query'])
-            
-            if result['success']:
-                # Форматируем результат
-                formatted = self._format_result(result['data'], request_data['search_type'])
-                request_data['result'] = formatted
-            else:
-                request_data['result'] = f"❌ Ошибка: {result.get('error', 'Неизвестная ошибка')}"
-            
-        except Exception as e:
-            request_data['result'] = f"❌ Исключение: {str(e)}"
-        
-        finally:
-            # Сигнализируем о завершении
-            request_data['event'].set()
     
     def _format_result(self, data: Any, search_type: str) -> str:
         """Форматирование результата поиска"""
@@ -350,24 +365,150 @@ class SessionManager:
         
         return "\n\n".join(results)
     
-    def add_search_request(self, search_type: str, query: str) -> str:
-        """Добавление запроса в очередь и ожидание результата"""
-        event = threading.Event()
-        request_data = {
-            'search_type': search_type,
-            'query': query,
-            'event': event,
-            'result': None
+    def execute_task(self, method_name: str, *args, **kwargs) -> Dict:
+        """Добавление задачи в очередь и ожидание результата"""
+        task_id = f"{self.account['username']}_{int(time.time())}_{random.randint(1000, 9999)}"
+        
+        # Добавляем задачу в очередь
+        self.task_queue.put((task_id, method_name, args, kwargs))
+        
+        # Ждем результат
+        start_time = time.time()
+        while time.time() - start_time < 30:  # Таймаут 30 секунд
+            try:
+                # Проверяем очередь результатов
+                result_id, result = self.result_queue.get(timeout=0.1)
+                if result_id == task_id:
+                    return result
+                else:
+                    # Не наш результат, кладем обратно
+                    self.result_queue.put((result_id, result))
+            except queue.Empty:
+                continue
+        
+        return {"success": False, "error": "Таймаут ожидания результата"}
+    
+    def _cleanup(self):
+        """Очистка ресурсов"""
+        try:
+            if self.page:
+                self.page.close()
+            if self.context:
+                self.context.close()
+            if self.browser:
+                self.browser.close()
+            if self.playwright:
+                self.playwright.stop()
+            self.is_active = False
+            print(f"✅ Сессия {self.account['username']} очищена")
+        except:
+            pass
+    
+    def stop(self):
+        """Остановка рабочего потока"""
+        self.stop_event.set()
+        self.task_queue.put(("dummy", "stop", [], {}))
+        if self.thread.is_alive():
+            self.thread.join(timeout=5)
+
+# ================== МЕНЕДЖЕР СЕССИЙ ==================
+class SessionManager:
+    """Управление сессиями Playwright"""
+    
+    def __init__(self):
+        self.sessions: List[PenaSession] = []
+        self.current_index = 0
+        self.lock = threading.Lock()
+        self.cache = {}  # Простой кэш результатов
+        self.cache_lock = threading.Lock()
+        
+    def initialize(self) -> bool:
+        """Инициализация сессий"""
+        print("🔄 Инициализация сессий...")
+        
+        for account in ACCOUNTS:
+            print(f"Создаем сессию для {account['username']}...")
+            session = PenaSession(account)
+            self.sessions.append(session)
+            
+            # Ждем пока сессия станет активной
+            for _ in range(30):  # 30 попыток по 1 секунде
+                if session.is_active:
+                    print(f"✅ Сессия {account['username']} активна")
+                    break
+                time.sleep(1)
+            else:
+                print(f"⚠️ Сессия {account['username']} не активировалась")
+        
+        active_sessions = len([s for s in self.sessions if s.is_active])
+        print(f"✅ Активных сессий: {active_sessions} из {len(self.sessions)}")
+        
+        return active_sessions > 0
+    
+    def search(self, query: str) -> Dict:
+        """Поиск с использованием кэша и round-robin"""
+        # Проверяем кэш
+        cache_key = query.lower().strip()
+        with self.cache_lock:
+            if cache_key in self.cache:
+                cached = self.cache[cache_key]
+                if time.time() - cached["timestamp"] < 300:  # 5 минут кэш
+                    print(f"📦 Использован кэш для: {query}")
+                    return cached["result"]
+        
+        with self.lock:
+            if not self.sessions:
+                return {"success": False, "error": "Нет активных сессий"}
+            
+            # Выбираем сессию round-robin
+            for _ in range(len(self.sessions)):
+                session = self.sessions[self.current_index]
+                self.current_index = (self.current_index + 1) % len(self.sessions)
+                
+                if session.is_active:
+                    print(f"🔄 Используем сессию {session.account['username']} для запроса: {query}")
+                    
+                    # Выполняем поиск
+                    result = session.execute_task("search", query)
+                    
+                    # Сохраняем в кэш при успехе
+                    if result.get("success"):
+                        with self.cache_lock:
+                            self.cache[cache_key] = {
+                                "result": result,
+                                "timestamp": time.time(),
+                                "query": query
+                            }
+                    
+                    return result
+        
+        return {"success": False, "error": "Нет доступных сессий"}
+    
+    def get_status(self) -> Dict:
+        """Получение статуса всех сессий"""
+        sessions_info = []
+        for session in self.sessions:
+            sessions_info.append({
+                "username": session.account['username'],
+                "is_active": session.is_active,
+                "fingerprint": session.fingerprint[:20] + "..." if session.fingerprint else "Нет",
+                "cookies_count": len(session.cookies),
+                "last_used": session.last_used
+            })
+        
+        return {
+            "total_sessions": len(self.sessions),
+            "active_sessions": len([s for s in self.sessions if s.is_active]),
+            "sessions": sessions_info,
+            "cache_size": len(self.cache)
         }
-        
-        # Добавляем в очередь
-        self.request_queue.put(request_data)
-        
-        # Ждем результат (таймаут 30 секунд)
-        if event.wait(timeout=30):
-            return request_data['result']
-        else:
-            return "⌛ Таймаут ожидания результата"
+    
+    def cleanup(self):
+        """Очистка всех сессий"""
+        print("🔄 Очистка всех сессий...")
+        for session in self.sessions:
+            session.stop()
+        print("✅ Все сессии очищены")
 
 # ================== FLASK СЕРВЕР ==================
 app = Flask(__name__)
@@ -408,11 +549,14 @@ def before_request():
 @app.route('/api/health', methods=['GET'])
 def health():
     """Проверка здоровья сервера"""
+    status = session_manager.get_status()
     return jsonify({
         'status': 'ok',
-        'sessions': len(session_manager.sessions),
-        'queue_size': session_manager.request_queue.qsize(),
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat(),
+        'sessions': status['active_sessions'],
+        'total_sessions': status['total_sessions'],
+        'cache_size': status['cache_size'],
+        'queue_size': 0
     })
 
 @app.route('/api/session/start', methods=['POST'])
@@ -484,26 +628,44 @@ def search():
         
         print(f"🔍 Поиск от пользователя {user_id}: {query[:50]}...")
         
-        # Определяем тип поиска
-        if query.isdigit() and len(query) == 12:
-            search_type = "iin"
-        elif query.startswith(("+", "8", "7")):
-            search_type = "phone"
+        # Выполняем поиск через менеджер сессий
+        result = session_manager.search(query)
+        
+        if result.get('success'):
+            return jsonify({'result': result.get('formatted')})
         else:
-            search_type = "fio"
-        
-        # Отправляем запрос в очередь
-        result = session_manager.add_search_request(search_type, query)
-        
-        return jsonify({'result': result})
+            return jsonify({'error': result.get('error', 'Неизвестная ошибка')}), 500
         
     except Exception as e:
         print(f"❌ Ошибка поиска: {e}")
         traceback.print_exc()
         return jsonify({'error': 'Внутренняя ошибка'}), 500
 
+@app.route('/api/debug/sessions', methods=['GET'])
+def debug_sessions():
+    """Отладочная информация о сессиях"""
+    status = session_manager.get_status()
+    return jsonify(status)
+
+@app.route('/api/debug/clear_cache', methods=['POST'])
+def clear_cache():
+    """Очистка кэша"""
+    with session_manager.cache_lock:
+        session_manager.cache.clear()
+    return jsonify({'success': True, 'message': 'Кэш очищен'})
+
 # ================== ЗАПУСК ==================
+def cleanup_on_exit():
+    """Очистка при выходе"""
+    print("\n🛑 Очистка ресурсов при выходе...")
+    session_manager.cleanup()
+    sys.exit(0)
+
 if __name__ == '__main__':
+    import signal
+    signal.signal(signal.SIGINT, lambda s, f: cleanup_on_exit())
+    signal.signal(signal.SIGTERM, lambda s, f: cleanup_on_exit())
+    
     print("\n" + "=" * 60)
     print("🚀 ЗАПУСК PENA.REST API СЕРВЕРА")
     print("=" * 60)
@@ -514,7 +676,7 @@ if __name__ == '__main__':
     # Инициализируем сессии
     if session_manager.initialize():
         print(f"\n✅ СЕРВЕР ГОТОВ К РАБОТЕ!")
-        print(f"📊 Активных сессий: {len(session_manager.sessions)}")
+        print(f"📊 Активных сессий: {len([s for s in session_manager.sessions if s.is_active])}")
         print(f"👤 Разрешенных пользователей: {len(allowed_users)}")
         print(f"🌐 API доступен по адресу: http://0.0.0.0:5000")
         
@@ -527,3 +689,4 @@ if __name__ == '__main__':
         )
     else:
         print("❌ Не удалось инициализировать сессии")
+        cleanup_on_exit()
